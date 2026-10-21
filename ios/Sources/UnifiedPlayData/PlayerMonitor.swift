@@ -29,6 +29,11 @@ open class PlayerMonitor: AdTarget {
     private var readyAt: Double?
     private var width = 0
     private var height = 0
+    // Requests before a view exists (the manifest, a preload) go into it when it starts.
+    private enum RequestKind { case completed, failed, canceled }
+    private var early: [(RequestKind, RequestInfo)] = []
+    private var drmType = ""
+    private var mode = "standard"
 
     public init(client: DataClient, player: PlayerInfo) {
         self.client = client
@@ -62,6 +67,8 @@ open class PlayerMonitor: AdTarget {
         view = nil
         sourceAt = hasSource ? Self.now() : nil
         readyAt = nil
+        early = []
+        drmType = ""
     }
 
     /// The player could start: player startup is done.
@@ -84,6 +91,10 @@ open class PlayerMonitor: AdTarget {
         client.add(next)
         next.playerSize(width: width, height: height)
         if let sourceAt, let readyAt { next.playerStartup(readyAt - sourceAt) }
+        if !drmType.isEmpty { next.setDrmType(drmType) }
+        if mode != "standard" { next.playbackMode(mode) }
+        for (kind, request) in early { record(next, kind, request) }
+        early = []
         onNewView(next)
         client.flush()
         return next
@@ -94,6 +105,35 @@ open class PlayerMonitor: AdTarget {
         self.width = width
         self.height = height
         view?.playerSize(width: width, height: height)
+    }
+
+    /// Content requests came back (the monitors report their player's loads by themselves).
+    public func requestCompleted(_ request: RequestInfo) { report(.completed, request) }
+    public func requestFailed(_ request: RequestInfo) { report(.failed, request) }
+    public func requestCanceled(_ request: RequestInfo) { report(.canceled, request) }
+
+    /// The DRM in use (widevine, playready, fairplay, clearkey).
+    public func setDrmType(_ type: String) {
+        drmType = type
+        view?.setDrmType(type)
+    }
+
+    /// The app's player went fullscreen ("fullscreen"), picture-in-picture ("pip") or back ("standard").
+    public func playbackMode(_ next: String) {
+        mode = next
+        view?.playbackMode(next)
+    }
+
+    private func report(_ kind: RequestKind, _ request: RequestInfo) {
+        if let view, !view.ended { record(view, kind, request) } else if early.count < 50 { early.append((kind, request)) }
+    }
+
+    private func record(_ view: ViewTracker, _ kind: RequestKind, _ request: RequestInfo) {
+        switch kind {
+        case .completed: view.requestCompleted(request)
+        case .failed: view.requestFailed(request)
+        case .canceled: view.requestCanceled(request)
+        }
     }
 
     public func adBreakStart() {

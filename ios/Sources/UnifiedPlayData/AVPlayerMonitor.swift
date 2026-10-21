@@ -36,6 +36,8 @@ public final class AVPlayerMonitor: PlayerMonitor {
     private var playerObservations: [NSKeyValueObservation] = []
     private var itemObservations: [NSKeyValueObservation] = []
     private var itemTokens: [NSObjectProtocol] = []
+    // The access log's totals already reported, per log entry (AVPlayer reports requests in batches).
+    private var reported: [Int: (requests: Int, bytes: Int64, seconds: Double)] = [:]
 
     public init(client: DataClient, player: AVPlayer, layer: AVPlayerLayer? = nil,
                 describe: @escaping (AVPlayerItem) -> VideoInfo = { _ in VideoInfo() }) {
@@ -95,8 +97,14 @@ public final class AVPlayerMonitor: PlayerMonitor {
     private func itemChanged(_ item: AVPlayerItem?) {
         stopItem()
         kbps = nil
+        reported = [:]
         newSource(hasSource: item != nil)
         guard let item else { return }
+        // AVPlayer only plays FairPlay-protected content.
+        let asset = item.asset
+        Task { @MainActor [weak self] in
+            if (try? await asset.load(.hasProtectedContent)) == true { self?.setDrmType("fairplay") }
+        }
         if item.status == .readyToPlay { ready() }
         itemObservations = [
             item.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -132,11 +140,37 @@ public final class AVPlayerMonitor: PlayerMonitor {
             if let last = log.events.last, last.indicatedBitrate > 0 { kbps = last.indicatedBitrate / 1000 }
             renditionChanged(item)
             view?.droppedFrames(log.events.reduce(0) { $0 + max(0, $1.numberOfDroppedVideoFrames) })
+            accessLog(log)
         }
         on(.AVPlayerItemNewErrorLogEntry) { [weak self] note in
             guard let event = (note.object as? AVPlayerItem)?.errorLog()?.events.last else { return }
+            self?.requestFailed(RequestInfo(type: Self.requestType(event.uri), hostname: event.uri.flatMap { URL(string: $0)?.host },
+                                            error: event.errorDomain, errorCode: event.errorStatusCode, errorText: event.errorComment))
             self?.view?.failed(code: String(event.errorStatusCode), message: event.errorComment ?? "", fatal: false)
         }
+    }
+
+    /// Network requests (spec: Requests) from the access log: its media requests, bytes and transfer time
+    /// since the last entry. AVPlayer reports no response headers and no time to first byte.
+    private func accessLog(_ log: AVPlayerItemAccessLog) {
+        for (index, event) in log.events.enumerated() {
+            let before = reported[index] ?? (0, 0, 0)
+            let requests = max(0, event.numberOfMediaRequests - before.requests)
+            let bytes = max(0, event.numberOfBytesTransferred - before.bytes)
+            let seconds = max(0, event.transferDuration - before.seconds)
+            reported[index] = (max(before.requests, event.numberOfMediaRequests), max(before.bytes, event.numberOfBytesTransferred),
+                               max(before.seconds, event.transferDuration))
+            guard requests > 0 else { continue }
+            requestCompleted(RequestInfo(type: "media", hostname: event.uri.flatMap { URL(string: $0)?.host }, start: 0,
+                                         responseEnd: seconds * 1000, bytes: Int(bytes), count: requests))
+        }
+    }
+
+    nonisolated private static func requestType(_ uri: String?) -> String {
+        let path = (uri.flatMap { URL(string: $0)?.path } ?? "").lowercased()
+        if path.hasSuffix(".m3u8") { return "manifest" }
+        if uri?.lowercased().hasPrefix("skd://") == true { return "encryption" }
+        return "media"
     }
 
     private func stopItem() {

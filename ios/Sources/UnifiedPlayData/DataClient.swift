@@ -5,7 +5,7 @@ import UIKit
 #endif
 
 public let sdkName = "unifiedplay-data-ios"
-public let sdkVersion = "1.0.0"
+public let sdkVersion = "1.1.0"
 public let defaultAPIBase = URL(string: "https://backend.unifiedplay.com")!
 private let beaconPath = "/api/v1/data/beacons"
 private let deviceKey = "unifiedplay-data-device"
@@ -18,6 +18,9 @@ public struct DataConfig: Sendable {
     public var key: String
     /// Where beacons go. Defaults to UnifiedPlay.
     public var apiBase: URL
+    /// Your own beacon host (data.example.com), set up in the Console's Video data page: beacons go to
+    /// https://{beaconDomain}, which blockers of other sites' hosts let through. Wins over apiBase.
+    public var beaconDomain: String?
     /// Defaults to the app's CFBundleShortVersionString.
     public var appVersion: String?
     /// Your own id for the viewer, if you want views per viewer: an opaque id, never an email.
@@ -25,9 +28,11 @@ public struct DataConfig: Sendable {
     public var userID: String?
     public var interval: TimeInterval
 
-    public init(key: String, apiBase: URL = defaultAPIBase, appVersion: String? = nil, userID: String? = nil, interval: TimeInterval = 10) {
+    public init(key: String, apiBase: URL = defaultAPIBase, beaconDomain: String? = nil, appVersion: String? = nil, userID: String? = nil,
+                interval: TimeInterval = 10) {
         self.key = key
         self.apiBase = apiBase
+        self.beaconDomain = beaconDomain
         self.appVersion = appVersion
         self.userID = userID
         self.interval = interval
@@ -108,6 +113,13 @@ public final class DataClient {
         flush()
     }
 
+    /// Where beacons go: the beacon domain when set, else apiBase.
+    static func base(_ config: DataConfig) -> URL {
+        guard let domain = config.beaconDomain?.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
+            .split(separator: "/").first, !domain.isEmpty, let url = URL(string: "https://\(domain)") else { return config.apiBase }
+        return url
+    }
+
     /// Sends now. One beacon at a time; a call during one sends again when it is back.
     public func flush() {
         guard !disabled, !views.isEmpty else { return }
@@ -127,7 +139,7 @@ public final class DataClient {
             "device": device.merging(["connection": Connection.shared.current]) { given, _ in given },
             "views": snapshots,
         ]
-        var request = URLRequest(url: config.apiBase.appendingPathComponent(beaconPath))
+        var request = URLRequest(url: Self.base(config).appendingPathComponent(beaconPath))
         request.httpMethod = "POST"
         request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

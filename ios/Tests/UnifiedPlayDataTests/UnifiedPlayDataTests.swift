@@ -27,6 +27,49 @@ final class ViewTrackerTests: XCTestCase {
         XCTAssertEqual(types(snapshot), ["viewstart", "play", "playing", "rebufferstart", "rebufferend", "playing", "seeking", "seeked", "playing", "pause"])
     }
 
+    func testAddsUpRequestsCountsFailuresByTypeAndNamesTheCDN() {
+        let view = ViewTracker(video: VideoInfo(id: "ep_1", viewSessionID: "cmcd-1"), player: PlayerInfo(name: "test")) { [unowned self] in time }
+        view.requestCompleted(RequestInfo(type: "manifest", start: 0, responseStart: 50, responseEnd: 80, bytes: 2_000, headers: ["X-CDN": "fastly"]))
+        view.requestCompleted(RequestInfo(type: "video", start: 100, responseStart: 140, responseEnd: 1100, bytes: 1_250_000))
+        view.requestCompleted(RequestInfo(type: "audio", start: 100, responseStart: 160, responseEnd: 600, bytes: 125_000, headers: ["x-cdn": "cloudflare"]))
+        view.requestCompleted(RequestInfo(type: "video_init", start: 0, responseEnd: 10, bytes: 900))
+        view.requestCompleted(RequestInfo(type: "media", start: 0, responseEnd: 2000, bytes: 500_000, count: 4)) // an access log batch
+        view.requestFailed(RequestInfo(type: "video", hostname: "cdn.example.com", error: "CoreMediaErrorDomain", errorCode: 503))
+        view.requestFailed(RequestInfo(type: "encryption", errorCode: 403))
+        view.requestCanceled(RequestInfo(type: "audio"))
+        view.playbackMode("pip"); view.playbackMode("pip"); view.playbackMode("standard")
+        view.setDrmType("fairplay")
+        let snapshot = view.snapshot()
+        let m = metrics(snapshot)
+        XCTAssertEqual(m["request_completed"] as? Int, 8)
+        XCTAssertEqual(m["request_failed"] as? Int, 2)
+        XCTAssertEqual(m["request_canceled"] as? Int, 1)
+        XCTAssertEqual(m["request_failed_media"] as? Int, 1)
+        XCTAssertEqual(m["request_failed_encryption"] as? Int, 1)
+        XCTAssertEqual(m["request_media_completed"] as? Int, 6)
+        XCTAssertEqual(m["request_media_bytes"] as? Int, 1_875_000)
+        XCTAssertEqual(m["request_media_ms"] as? Int, 3500)
+        XCTAssertEqual(m["request_media_ttfb_ms"] as? Int, 100)
+        XCTAssertEqual(m["request_media_ttfb_count"] as? Int, 2)
+        XCTAssertEqual(m["request_media_max_ttfb_ms"] as? Int, 60)
+        let video = snapshot["video"] as! [String: Any]
+        XCTAssertEqual(video["cdn"] as? String, "cloudflare")
+        XCTAssertEqual(video["drm_type"] as? String, "fairplay")
+        let player = snapshot["player"] as! [String: Any]
+        XCTAssertEqual(player["pip"] as? Bool, true)
+        XCTAssertEqual(player["fullscreen"] as? Bool, false)
+        XCTAssertEqual(snapshot["view_session_id"] as? String, "cmcd-1")
+        XCTAssertEqual(types(snapshot).filter { $0 == "cdnchange" }.count, 2)
+        XCTAssertEqual(types(snapshot).filter { $0 == "playbackmodechange" }.count, 2)
+        XCTAssertEqual(drmTypeOf("com.apple.streamingkeydelivery"), "fairplay")
+    }
+
+    @MainActor
+    func testSendsToTheBeaconDomain() {
+        XCTAssertEqual(DataClient.base(DataConfig(key: "k", beaconDomain: "https://data.example.com/x")).absoluteString, "https://data.example.com")
+        XCTAssertEqual(DataClient.base(DataConfig(key: "k")).absoluteString, defaultAPIBase.absoluteString)
+    }
+
     func testCountsAStallBeforeTheFirstFrameAsStartup() {
         let view = tracker()
         view.play(); view.seeking(); view.bufferingStart(); time += 2000; view.playing()
