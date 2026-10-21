@@ -19,9 +19,49 @@ data class VideoInfo(
     val streamType: String = "on-demand",
     val sourceType: String? = null,
     val sourceHost: String? = null,
+    /** The CDN serving the video, when you know it; otherwise the X-CDN response header names it. */
+    val cdn: String? = null,
+    /** widevine, playready, fairplay or clearkey, when the player cannot tell. */
+    val drmType: String? = null,
+    /** Your own id for this view, to join it with CDN logs: give your player's CMCD session id the same value. */
+    val viewSessionId: String? = null,
     /** Up to five of your own dimensions (1..5: an experiment, a page type…); the Console breaks views down by them. */
     val custom: Map<Int, String> = emptyMap(),
 )
+
+/**
+ * One network request for the content (spec: Requests). type: manifest, video, audio, video_init,
+ * audio_init, media, subtitle or encryption. Times are milliseconds on any one clock.
+ */
+data class RequestInfo(
+    val type: String? = null,
+    val hostname: String? = null,
+    val start: Long? = null,
+    /** When the first byte arrived, if the player tells. */
+    val responseStart: Long? = null,
+    val responseEnd: Long? = null,
+    val bytes: Long? = null,
+    /** Response headers: X-CDN names the CDN. */
+    val headers: Map<String, List<String>> = emptyMap(),
+    val error: String? = null,
+    val errorCode: Int? = null,
+    val errorText: String? = null,
+)
+
+private val MEDIA_REQUESTS = setOf("video", "audio", "media")
+private val FAILED_MEDIA = setOf("video", "audio", "media", "video_init", "audio_init")
+
+/** widevine, playready, fairplay or clearkey from a key system name or scheme UUID ("" when unknown). */
+fun drmTypeOf(keySystem: String?): String {
+    val name = keySystem.orEmpty().lowercase()
+    return when {
+        "widevine" in name || "edef8ba9" in name -> "widevine"
+        "playready" in name || "9a04f079" in name -> "playready"
+        "fairplay" in name || "apple.fps" in name || "streamingkeydelivery" in name || "94ce86fb" in name -> "fairplay"
+        "clearkey" in name || "e2719d58" in name || "1077efec" in name -> "clearkey"
+        else -> ""
+    }
+}
 
 data class PlayerInfo(val name: String, val version: String? = null, val autoplay: Boolean = false)
 
@@ -61,6 +101,11 @@ class ViewTracker(
     private var adBreakAt = 0L
     private var startupAdMs = 0L
     private var adPlayingSince: Long? = null
+    private var cdn: String = video.cdn.orEmpty()
+    private var drmType: String = video.drmType.orEmpty()
+    private var fullscreen = false
+    private var pip = false
+    private var mode = "standard"
     var ended = false
         private set
 
@@ -85,9 +130,79 @@ class ViewTracker(
     private var adCount = 0
     private var adWatchMs = 0L
     private var adErrorCount = 0
+    private var requestCompleted = 0
+    private var requestFailed = 0
+    private var requestCanceled = 0
+    private var requestFailedManifest = 0
+    private var requestFailedMedia = 0
+    private var requestFailedEncryption = 0
+    private var requestMediaCompleted = 0
+    private var requestMediaBytes = 0L
+    private var requestMediaMs = 0L
+    private var requestMediaTtfbMs = 0L
+    private var requestMediaTtfbCount = 0
+    private var requestMediaMaxTtfbMs = 0L
 
     init {
         event("viewstart")
+    }
+
+    /** A content request came back. Media segments add to the throughput and latency totals. */
+    fun requestCompleted(request: RequestInfo) {
+        if (ended) return
+        requestCompleted += 1
+        cdnFrom(request)
+        if ((request.type ?: "media") !in MEDIA_REQUESTS) return
+        requestMediaCompleted += 1
+        requestMediaBytes += max(0, request.bytes ?: 0)
+        val start = request.start ?: return
+        request.responseEnd?.let { requestMediaMs += max(0, it - start) }
+        request.responseStart?.let {
+            val ttfb = max(0, it - start)
+            requestMediaTtfbMs += ttfb
+            requestMediaTtfbCount += 1
+            requestMediaMaxTtfbMs = max(requestMediaMaxTtfbMs, ttfb)
+        }
+    }
+
+    fun requestFailed(request: RequestInfo) {
+        if (ended) return
+        requestFailed += 1
+        when (request.type) {
+            "manifest" -> requestFailedManifest += 1
+            "encryption" -> requestFailedEncryption += 1
+            in FAILED_MEDIA -> requestFailedMedia += 1
+        }
+        cdnFrom(request)
+        event("requestfailed", mapOf("type" to request.type, "hostname" to request.hostname, "error" to request.error,
+            "code" to request.errorCode, "text" to request.errorText))
+    }
+
+    fun requestCanceled(request: RequestInfo) {
+        if (ended) return
+        requestCanceled += 1
+        event("requestcanceled", mapOf("type" to request.type, "hostname" to request.hostname))
+    }
+
+    /** standard, fullscreen, pip, or your own name. */
+    fun playbackMode(next: String) {
+        if (next == mode) return
+        mode = next
+        if (next == "fullscreen") fullscreen = true
+        if (next == "pip") pip = true
+        event("playbackmodechange", mapOf("mode" to next))
+    }
+
+    fun setDrmType(type: String) {
+        if (type.isNotEmpty()) drmType = type
+    }
+
+    private fun cdnFrom(request: RequestInfo) {
+        // An app-set CDN wins; otherwise the latest X-CDN header names it.
+        val name = request.headers.entries.firstOrNull { it.key.equals("x-cdn", ignoreCase = true) }?.value?.firstOrNull()?.trim()?.take(64)
+        if (name.isNullOrEmpty() || video.cdn != null || name == cdn) return
+        cdn = name
+        event("cdnchange", mapOf("cdn" to name))
     }
 
     /** How long the player took from getting the source to being able to start (the monitor measures it). */
@@ -287,11 +402,13 @@ class ViewTracker(
                 "id" to video.id, "title" to video.title, "series_id" to video.seriesId, "series_title" to video.seriesTitle,
                 "duration_ms" to video.durationMs, "stream_type" to video.streamType,
                 "source_type" to video.sourceType, "source_host" to video.sourceHost,
+                "cdn" to cdn.ifEmpty { null }, "drm_type" to drmType.ifEmpty { null },
             ),
             "player" to mapOf(
                 "name" to player.name, "version" to player.version, "autoplay" to player.autoplay,
-                "width" to playerWidth, "height" to playerHeight,
+                "width" to playerWidth, "height" to playerHeight, "fullscreen" to fullscreen, "pip" to pip,
             ),
+            "view_session_id" to video.viewSessionId,
             "metrics" to mapOf(
                 "player_startup_ms" to playerStartupMs,
                 "video_startup_ms" to videoStartupMs,
@@ -316,6 +433,18 @@ class ViewTracker(
                 "ad_count" to adCount,
                 "ad_watch_ms" to adWatchMs,
                 "ad_error_count" to adErrorCount,
+                "request_completed" to requestCompleted,
+                "request_failed" to requestFailed,
+                "request_canceled" to requestCanceled,
+                "request_failed_manifest" to requestFailedManifest,
+                "request_failed_media" to requestFailedMedia,
+                "request_failed_encryption" to requestFailedEncryption,
+                "request_media_completed" to requestMediaCompleted,
+                "request_media_bytes" to requestMediaBytes,
+                "request_media_ms" to requestMediaMs,
+                "request_media_ttfb_ms" to requestMediaTtfbMs,
+                "request_media_ttfb_count" to requestMediaTtfbCount,
+                "request_media_max_ttfb_ms" to requestMediaMaxTtfbMs,
             ),
             "custom" to video.custom.filterValues { it.isNotEmpty() }.mapKeys { it.key.toString() },
             "error" to error,

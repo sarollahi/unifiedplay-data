@@ -15,7 +15,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 const val SDK_NAME = "unifiedplay-data-android"
-const val SDK_VERSION = "1.0.0"
+const val SDK_VERSION = "1.1.0"
 const val DEFAULT_API_BASE = "https://backend.unifiedplay.com"
 private const val BEACON_PATH = "/api/v1/data/beacons"
 private const val PREFS = "unifiedplay-data"
@@ -29,6 +29,11 @@ data class DataConfig(
     val key: String,
     /** Where beacons go. Defaults to UnifiedPlay. */
     val apiBase: String = DEFAULT_API_BASE,
+    /**
+     * Your own beacon host (data.example.com), set up in the Console's Video data page: beacons go
+     * to https://{beaconDomain}, which blockers of other sites' hosts let through. Wins over apiBase.
+     */
+    val beaconDomain: String? = null,
     /** Defaults to the app's versionName. */
     val appVersion: String = "",
     /**
@@ -125,7 +130,9 @@ class DataClient internal constructor(
                 "views" to snapshots,
             ),
         ).toString()
-        val url = config.apiBase.trimEnd('/') + BEACON_PATH
+        val base = config.beaconDomain?.takeIf { it.isNotBlank() }
+            ?.let { "https://" + it.removePrefix("https://").removePrefix("http://").substringBefore('/') } ?: config.apiBase
+        val url = base.trimEnd('/') + BEACON_PATH
         val key = config.key
         io.execute {
             val result = runCatching { send(url, key, body) }.getOrNull()
