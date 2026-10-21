@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "paths": {
+      "@unifiedplay/data": [
+        "./packages/data/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "packages/*/test",
+    "packages/*/src"
+  ]
+}

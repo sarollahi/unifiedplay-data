@@ -1,0 +1,19 @@
+{
+  "name": "unifiedplay-data-web",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b packages/*",
+    "typecheck": "tsc -b packages/* && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "clean": "rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0",
+    "typescript": "5.9.2",
+    "vitest": "4.1.11"
+  }
+}

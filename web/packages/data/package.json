@@ -1,0 +1,28 @@
+{
+  "name": "@unifiedplay/data",
+  "version": "1.0.0",
+  "description": "UnifiedPlay Data for the web: playback quality data from HTML5 video and players like it",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "license": "MIT",
+  "homepage": "https://github.com/sarollahi/unifiedplay-data",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sarollahi/unifiedplay-data.git",
+    "directory": "web/packages/data"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
