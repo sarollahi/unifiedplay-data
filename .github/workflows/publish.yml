@@ -1,0 +1,84 @@
+name: Publish
+
+# Publishing a GitHub Release (tag v1.2.3) publishes that version: the Android libraries to Maven
+# Central, the web packages to npm. The Swift package needs nothing: SwiftPM reads the tag itself.
+# Secrets: MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD (a Central Portal user token),
+# SIGNING_KEY / SIGNING_KEY_PASSWORD (the armored GPG key the artifacts are signed with), and
+# NPM_TOKEN only until npm trusted publishing is set up for every package (then npm needs no token).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: The tag matches every library's version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          grep -qx "VERSION_NAME=$version" android/gradle.properties
+          grep -q "SDK_VERSION = \"$version\"" android/core/src/main/kotlin/com/unifiedplay/data/DataClient.kt
+          grep -q "sdkVersion = \"$version\"" ios/Sources/UnifiedPlayData/DataClient.swift
+          grep -q "SDK_VERSION = '$version'" web/packages/data/src/client.ts
+          for package in web/packages/*/package.json; do
+            test "$(jq -r .version "$package")" = "$version" || { echo "::error file=$package::not $version"; exit 1; }
+          done
+
+  android:
+    needs: versions
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: ./gradlew --no-daemon :core:testDebugUnitTest
+      - run: ./gradlew --no-daemon -PsignAllPublications=true publishAndReleaseToMavenCentral
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+
+  web:
+    needs: versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm provenance: the registry shows which commit and workflow built each package.
+      id-token: write
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing (OIDC) needs npm 11.5.1 or later.
+      - run: npm install -g npm@11.6.2
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      # MIT: the notice goes with every copy, so each package carries the license text.
+      - run: for package in packages/*; do cp ../LICENSE "$package/"; done
+      # npm uses trusted publishing where it is set up, else the token.
+      - run: npm publish --workspaces --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
