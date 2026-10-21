@@ -2,9 +2,9 @@ name: Publish
 
 # Publishing a GitHub Release (tag v1.2.3) publishes that version: the Android libraries to Maven
 # Central, the web packages to npm. The Swift package needs nothing: SwiftPM reads the tag itself.
-# Secrets: MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD (a Central Portal user token),
-# SIGNING_KEY / SIGNING_KEY_PASSWORD (the armored GPG key the artifacts are signed with), and
-# NPM_TOKEN only until npm trusted publishing is set up for every package (then npm needs no token).
+# Secrets: MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD (a Central Portal user token) and
+# SIGNING_KEY / SIGNING_KEY_PASSWORD (the armored GPG key the artifacts are signed with). npm needs
+# no secret: every package trusts this workflow (npm trusted publishing).
 on:
   release:
     types: [published]
@@ -58,7 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # npm provenance: the registry shows which commit and workflow built each package.
+      # npm trusted publishing and provenance: npm checks this workflow's OIDC token and shows
+      # which commit built each package.
       id-token: write
     defaults:
       run:
@@ -71,14 +72,13 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      # Trusted publishing (OIDC) needs npm 11.5.1 or later.
-      - run: npm install -g npm@11.6.2
+      # npm stage needs npm 11.21.1 or later.
+      - run: npm install -g npm@11.21.1
       - run: npm ci
       - run: npm test
       - run: npm run build
       # MIT: the notice goes with every copy, so each package carries the license text.
       - run: for package in packages/*; do cp ../LICENSE "$package/"; done
-      # npm uses trusted publishing where it is set up, else the token.
-      - run: npm publish --workspaces --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Staged: each version waits on npmjs.com until a maintainer approves it with 2FA. npm stage
+      # ignores workspaces, so each package is staged from its own folder.
+      - run: for package in packages/*; do (cd "$package" && npm stage publish --access public --provenance); done
