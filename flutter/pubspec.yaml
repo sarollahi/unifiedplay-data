@@ -1,0 +1,21 @@
+name: unifiedplay_data
+description: UnifiedPlay Data for Flutter's video_player - startup time, rebuffering, failures, quality, requests and ads in the UnifiedPlay Console.
+version: 1.1.0
+homepage: https://github.com/sarollahi/unifiedplay-data
+repository: https://github.com/sarollahi/unifiedplay-data/tree/main/flutter
+license: MIT
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  shared_preferences: ^2.2.0
+  video_player: ^2.8.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
