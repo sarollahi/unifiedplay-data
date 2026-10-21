@@ -10,11 +10,18 @@ public struct VideoInfo: Sendable {
     public var streamType: String
     public var sourceType: String?
     public var sourceHost: String?
+    /// The CDN serving the video, when you know it (AVPlayer does not show response headers).
+    public var cdn: String?
+    /// widevine, playready, fairplay or clearkey; AVPlayer's protected content is fairplay.
+    public var drmType: String?
+    /// Your own id for this view, to join it with CDN logs: give your CMCD session id the same value.
+    public var viewSessionID: String?
     /// Up to five of your own dimensions (1...5: an experiment, a page type…); the Console breaks views down by them.
     public var custom: [Int: String]
 
     public init(id: String? = nil, title: String? = nil, seriesID: String? = nil, seriesTitle: String? = nil,
                 durationMs: Int? = nil, streamType: String = "on-demand", sourceType: String? = nil, sourceHost: String? = nil,
+                cdn: String? = nil, drmType: String? = nil, viewSessionID: String? = nil,
                 custom: [Int: String] = [:]) {
         self.id = id
         self.title = title
@@ -24,9 +31,50 @@ public struct VideoInfo: Sendable {
         self.streamType = streamType
         self.sourceType = sourceType
         self.sourceHost = sourceHost
+        self.cdn = cdn
+        self.drmType = drmType
+        self.viewSessionID = viewSessionID
         self.custom = custom
     }
 }
+
+/// One or more network requests for the content (spec: Requests). type: manifest, video, audio,
+/// video_init, audio_init, media, subtitle or encryption. Times are milliseconds on any one clock.
+public struct RequestInfo: Sendable {
+    public var type: String?
+    public var hostname: String?
+    public var start: Double?
+    /// When the first byte arrived, if the player tells.
+    public var responseStart: Double?
+    public var responseEnd: Double?
+    public var bytes: Int?
+    /// Response headers: X-CDN names the CDN.
+    public var headers: [String: String]
+    public var error: String?
+    public var errorCode: Int?
+    public var errorText: String?
+    /// How many requests these totals stand for (AVPlayer's access log reports them in batches).
+    public var count: Int
+
+    public init(type: String? = nil, hostname: String? = nil, start: Double? = nil, responseStart: Double? = nil, responseEnd: Double? = nil,
+                bytes: Int? = nil, headers: [String: String] = [:], error: String? = nil, errorCode: Int? = nil, errorText: String? = nil,
+                count: Int = 1) {
+        self.type = type
+        self.hostname = hostname
+        self.start = start
+        self.responseStart = responseStart
+        self.responseEnd = responseEnd
+        self.bytes = bytes
+        self.headers = headers
+        self.error = error
+        self.errorCode = errorCode
+        self.errorText = errorText
+        self.count = count
+    }
+}
+
+private let mediaRequests: Set<String> = ["video", "audio", "media"]
+private let failedMedia: Set<String> = ["video", "audio", "media", "video_init", "audio_init"]
 
 public struct PlayerInfo: Sendable {
     public var name: String
@@ -71,6 +119,11 @@ public final class ViewTracker {
     private var adBreakAt = 0.0
     private var startupAdMs = 0.0
     private var adPlayingSince: Double?
+    private var cdn: String
+    private var drmType: String
+    private var fullscreen = false
+    private var pip = false
+    private var mode = "standard"
     public private(set) var ended = false
 
     private var playerStartupMs: Double?
@@ -93,6 +146,18 @@ public final class ViewTracker {
     private var adCount = 0
     private var adWatchMs = 0.0
     private var adErrorCount = 0
+    private var requestCompleted = 0
+    private var requestFailed = 0
+    private var requestCanceled = 0
+    private var requestFailedManifest = 0
+    private var requestFailedMedia = 0
+    private var requestFailedEncryption = 0
+    private var requestMediaCompleted = 0
+    private var requestMediaBytes = 0
+    private var requestMediaMs = 0.0
+    private var requestMediaTtfbMs = 0.0
+    private var requestMediaTtfbCount = 0
+    private var requestMediaMaxTtfbMs = 0.0
 
     /// `now` is in milliseconds; tests pass their own clock.
     public init(video: VideoInfo, player: PlayerInfo, now: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime * 1000 }) {
@@ -101,7 +166,68 @@ public final class ViewTracker {
         self.now = now
         t0 = now()
         since = t0
+        cdn = video.cdn ?? ""
+        drmType = video.drmType ?? ""
         event("viewstart")
+    }
+
+    /// Content requests came back. Media segments add to the throughput and latency totals.
+    public func requestCompleted(_ request: RequestInfo) {
+        guard !ended else { return }
+        requestCompleted += request.count
+        cdn(from: request)
+        guard mediaRequests.contains(request.type ?? "media") else { return }
+        requestMediaCompleted += request.count
+        requestMediaBytes += max(0, request.bytes ?? 0)
+        guard let start = request.start else { return }
+        if let end = request.responseEnd { requestMediaMs += max(0, end - start) }
+        if let first = request.responseStart {
+            let ttfb = max(0, first - start)
+            requestMediaTtfbMs += ttfb
+            requestMediaTtfbCount += 1
+            requestMediaMaxTtfbMs = max(requestMediaMaxTtfbMs, ttfb)
+        }
+    }
+
+    public func requestFailed(_ request: RequestInfo) {
+        guard !ended else { return }
+        requestFailed += 1
+        switch request.type {
+        case "manifest": requestFailedManifest += 1
+        case "encryption": requestFailedEncryption += 1
+        case let type? where failedMedia.contains(type): requestFailedMedia += 1
+        default: break
+        }
+        cdn(from: request)
+        event("requestfailed", ["type": json(request.type), "hostname": json(request.hostname), "error": json(request.error),
+                                "code": json(request.errorCode), "text": json(request.errorText)])
+    }
+
+    public func requestCanceled(_ request: RequestInfo) {
+        guard !ended else { return }
+        requestCanceled += 1
+        event("requestcanceled", ["type": json(request.type), "hostname": json(request.hostname)])
+    }
+
+    /// standard, fullscreen, pip, or your own name.
+    public func playbackMode(_ next: String) {
+        guard next != mode else { return }
+        mode = next
+        if next == "fullscreen" { fullscreen = true }
+        if next == "pip" { pip = true }
+        event("playbackmodechange", ["mode": next])
+    }
+
+    public func setDrmType(_ type: String) {
+        if !type.isEmpty { drmType = type }
+    }
+
+    private func cdn(from request: RequestInfo) {
+        // An app-set CDN wins; otherwise the latest X-CDN header names it.
+        guard let name = request.headers.first(where: { $0.key.lowercased() == "x-cdn" })?.value.trimmingCharacters(in: .whitespaces).prefix(64),
+              !name.isEmpty, video.cdn == nil, String(name) != cdn else { return }
+        cdn = String(name)
+        event("cdnchange", ["cdn": cdn])
     }
 
     /// How long the player took from getting the source to being able to start (the monitor measures it).
@@ -317,6 +443,18 @@ public final class ViewTracker {
             "ad_count": adCount,
             "ad_watch_ms": Int(adWatchMs.rounded()),
             "ad_error_count": adErrorCount,
+            "request_completed": requestCompleted,
+            "request_failed": requestFailed,
+            "request_canceled": requestCanceled,
+            "request_failed_manifest": requestFailedManifest,
+            "request_failed_media": requestFailedMedia,
+            "request_failed_encryption": requestFailedEncryption,
+            "request_media_completed": requestMediaCompleted,
+            "request_media_bytes": requestMediaBytes,
+            "request_media_ms": Int(requestMediaMs.rounded()),
+            "request_media_ttfb_ms": Int(requestMediaTtfbMs.rounded()),
+            "request_media_ttfb_count": requestMediaTtfbCount,
+            "request_media_max_ttfb_ms": Int(requestMediaMaxTtfbMs.rounded()),
         ]
         return [
             "view_id": viewID,
@@ -327,11 +465,13 @@ public final class ViewTracker {
                 "id": json(video.id), "title": json(video.title), "series_id": json(video.seriesID),
                 "series_title": json(video.seriesTitle), "duration_ms": json(video.durationMs),
                 "stream_type": video.streamType, "source_type": json(video.sourceType), "source_host": json(video.sourceHost),
+                "cdn": json(cdn.isEmpty ? nil : cdn), "drm_type": json(drmType.isEmpty ? nil : drmType),
             ],
             "player": [
                 "name": player.name, "version": json(player.version), "autoplay": player.autoplay,
-                "width": json(playerWidth), "height": json(playerHeight),
+                "width": json(playerWidth), "height": json(playerHeight), "fullscreen": fullscreen, "pip": pip,
             ],
+            "view_session_id": json(video.viewSessionID),
             "metrics": metrics,
             "custom": Dictionary(uniqueKeysWithValues: video.custom.filter { !$0.value.isEmpty }.map { (String($0.key), $0.value) }),
             "error": json(error),
@@ -396,4 +536,14 @@ extension ISO8601DateFormatter {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+}
+
+/// widevine, playready, fairplay or clearkey from a key system name or scheme UUID ("" when unknown).
+public func drmTypeOf(_ keySystem: String?) -> String {
+    let name = (keySystem ?? "").lowercased()
+    if name.contains("widevine") || name.contains("edef8ba9") { return "widevine" }
+    if name.contains("playready") || name.contains("9a04f079") { return "playready" }
+    if name.contains("fairplay") || name.contains("apple.fps") || name.contains("streamingkeydelivery") || name.contains("94ce86fb") { return "fairplay" }
+    if name.contains("clearkey") || name.contains("e2719d58") || name.contains("1077efec") { return "clearkey" }
+    return ""
 }
