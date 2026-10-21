@@ -158,8 +158,9 @@ swift test   # at the repo root; the tracker and client run on macOS too
 The three trackers (`tracker.ts`, `ViewTracker.kt`, `ViewTracker.swift`) do the same thing and
 their tests check the same cases; change them together.
 
-Publishing a GitHub Release (tag `v1.2.3`) publishes every library: Android to Maven Central, web
-to npm, and the tag is the Swift package's version. The version must match
+Publishing a GitHub Release (tag `v1.2.3`) publishes every library: Android to Maven Central, and
+the tag is the Swift package's version. The web packages wait staged on npm until a maintainer
+approves each one on npmjs.com (2FA). The version must match
 `android/gradle.properties`, the web packages and the `SDK_VERSION` constants. `develop` and
 `main` change only through pull requests with green CI, and only the owner creates `v*` tags
 (`.github/rulesets/`).
