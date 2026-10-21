@@ -17,6 +17,10 @@ interface AdTarget {
     fun adError(code: String, message: String = "")
     /** The ads gave the video back. */
     fun adBreakEnd()
+    /** An ad request went out (VAST/VMAP): before the first pre-roll, its time is pre-roll request time. */
+    fun adRequest() {}
+    /** The ad response came back and was read. */
+    fun adResponse() {}
 }
 
 /**
@@ -31,6 +35,7 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
     private val early = mutableListOf<Pair<Int, RequestInfo>>()
     private var drmType = ""
     private var mode = "standard"
+    private var captionsOn = false
     private var sourceAt: Long? = null
     private var readyAt: Long? = null
     private var width = 0
@@ -88,6 +93,7 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
         if (source != null && ready != null) next.playerStartup(ready - source)
         if (drmType.isNotEmpty()) next.setDrmType(drmType)
         if (mode != "standard") next.playbackMode(mode)
+        if (captionsOn) next.captions(true)
         for ((kind, request) in early) record(next, kind, request)
         early.clear()
         onNewView(next)
@@ -116,6 +122,26 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
     fun setDrmType(type: String) {
         drmType = type
         view?.setDrmType(type)
+    }
+
+    /** Captions turned on or off. */
+    fun captions(on: Boolean) {
+        captionsOn = captionsOn || on
+        view?.captions(on)
+    }
+
+    /** Your own rule stopped playback (geo-block, paywall, too many streams): the view ends without failing. */
+    fun businessException(code: String, message: String = "") {
+        current()?.failed(code, message, fatal = true, businessException = true)
+        client.flush()
+    }
+
+    override fun adRequest() {
+        current()?.adRequest()
+    }
+
+    override fun adResponse() {
+        view?.adResponse()
     }
 
     /** The app's player went fullscreen ("fullscreen"), picture-in-picture ("pip") or back ("standard"). */

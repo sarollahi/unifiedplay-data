@@ -16,8 +16,20 @@ export interface VideoInfo {
   drmType?: string
   /** Your own id for this view, to join it with CDN logs: give your player's CMCD session id (sid) the same value. */
   viewSessionId?: string
-  /** Up to five of your own dimensions (an experiment, a page type…); the Console breaks views down by them. */
-  custom?: Partial<Record<1 | 2 | 3 | 4 | 5, string>>
+  /** episode, movie, trailer, clip, live… */
+  contentType?: string
+  /** The audio language, e.g. en, sv. */
+  languageCode?: string
+  /** Which variant of the video (a cut, a dub). */
+  variantName?: string
+  /** Which encoding ladder or settings, for comparing encodings. */
+  encodingVariant?: string
+  /** An A/B test this view is in. */
+  experimentName?: string
+  /** A part of your service (a site, a customer, a channel). */
+  subPropertyId?: string
+  /** Up to ten of your own dimensions; the Console breaks views down by them. */
+  custom?: Partial<Record<1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10, string>>
 }
 
 /** What a network request for the content was for (spec: Requests). */
@@ -75,8 +87,10 @@ export interface ViewSnapshot {
   view_session_id?: string
   metrics: Record<string, number | null>
   custom: Record<string, string>
-  error: { code: string; message: string; fatal: boolean } | null
+  error: { code: string; message: string; fatal: boolean; business_exception: boolean } | null
   events: BeaconEvent[]
+  experiment_name?: string
+  sub_property_id?: string
 }
 
 type State = 'idle' | 'starting' | 'playing' | 'paused' | 'rebuffering' | 'seeking' | 'ad' | 'ended'
@@ -99,7 +113,7 @@ export class ViewTracker {
   private playRequestedAt: number | null = null
   private firstFrame = false
   private events: BeaconEvent[] = []
-  private error: { code: string; message: string; fatal: boolean } | null = null
+  private error: { code: string; message: string; fatal: boolean; business_exception: boolean } | null = null
   private kbps: number | null = null
   private bitrateMs = 0
   private bitratePlayingMs = 0
@@ -118,6 +132,11 @@ export class ViewTracker {
   private pip = false
   private mode = 'standard'
   private page: PageInfo | null = null
+  private captionsOn = false
+  // Pre-roll (spec: Startup): when it was asked to play, the open ad request, the last ad response.
+  private prerollAt: number | null = null
+  private adRequestAt: number | null = null
+  private adResponseAt: number | null = null
   ended = false
 
   readonly metrics = {
@@ -156,6 +175,15 @@ export class ViewTracker {
     request_media_ttfb_ms: 0,
     request_media_ttfb_count: 0,
     request_media_max_ttfb_ms: 0,
+    content_startup_ms: null as number | null,
+    ad_startup_ms: null as number | null,
+    preroll_request_ms: null as number | null,
+    preroll_load_ms: null as number | null,
+    preroll_requests: 0,
+    page_load_ms: null as number | null,
+    upscale_pct_ms: 0,
+    downscale_pct_ms: 0,
+    max_downscale_pct: 0,
   }
 
   constructor(
@@ -225,6 +253,16 @@ export class ViewTracker {
     this.page = page
   }
 
+  /** The first view on a page: from the page's request to the player's start (web). */
+  pageLoad(ms: number): void {
+    if (this.metrics.page_load_ms === null && Number.isFinite(ms)) this.metrics.page_load_ms = Math.max(0, Math.round(ms))
+  }
+
+  /** Captions shown at some point of the view. */
+  captions(on: boolean): void {
+    if (on && !this.captionsOn) { this.captionsOn = true; this.event('captions', { on }) }
+  }
+
   private cdnFrom(request: RequestInfo): void {
     // An app-set CDN wins; otherwise the latest X-CDN header names it.
     const name = header(request.headers, 'x-cdn').trim().slice(0, 64)
@@ -253,7 +291,10 @@ export class ViewTracker {
     if (this.ended || this.state === 'ad') return
     if (!this.firstFrame) {
       this.firstFrame = true
-      this.metrics.video_startup_ms = Math.round(this.now() - (this.playRequestedAt ?? this.t0) - this.startupAdMs)
+      const since = this.now() - (this.playRequestedAt ?? this.t0)
+      // Video startup ends at the first frame of a pre-roll, if one came first; content startup leaves ads out.
+      this.metrics.video_startup_ms ??= Math.round(since)
+      this.metrics.content_startup_ms = Math.round(since - this.startupAdMs)
     }
     if (this.state === 'rebuffering') this.event('rebufferend')
     if (this.state !== 'playing') this.event('playing')
@@ -326,11 +367,15 @@ export class ViewTracker {
     if (Number.isFinite(ms)) this.metrics.live_latency_ms = Math.max(0, Math.round(ms))
   }
 
-  failed(code: string, message: string, fatal = true): void {
+  /**
+   * An error. fatal: it stopped playback. businessException: your own rule stopped it (geo-block,
+   * paywall, too many streams): no playback failure.
+   */
+  failed(code: string, message: string, fatal = true, businessException = false): void {
     if (this.ended) return
-    this.event('error', { code, message, fatal })
+    this.event('error', businessException ? { code, message, fatal, business_exception: true } : { code, message, fatal })
     if (!fatal) return
-    this.error = { code, message, fatal }
+    this.error = { code, message, fatal, business_exception: businessException }
     this.end()
   }
 
@@ -364,10 +409,34 @@ export class ViewTracker {
     this.move('ad')
   }
 
+  /** An ad request went out (VAST/VMAP). Before the first pre-roll plays, its time is pre-roll request time. */
+  adRequest(): void {
+    if (this.ended) return
+    if (!this.firstFrame && this.metrics.ad_startup_ms === null) {
+      this.metrics.preroll_requests += 1
+      this.adRequestAt ??= this.now()
+    }
+    this.event('adrequest')
+  }
+
+  /** The ad response came back and was read. */
+  adResponse(): void {
+    if (this.ended) return
+    const now = this.now()
+    if (this.adRequestAt !== null && this.playRequestedAt !== null && this.metrics.ad_startup_ms === null) {
+      // Only time after playback was asked for counts.
+      this.metrics.preroll_request_ms = Math.round((this.metrics.preroll_request_ms ?? 0) + now - Math.max(this.adRequestAt, this.playRequestedAt))
+    }
+    this.adRequestAt = null
+    this.adResponseAt = now
+    this.event('adresponse')
+  }
+
   /** An ad was asked to play. */
   adStart(): void {
     if (this.ended) return
     if (this.state !== 'ad') this.adBreakStart()
+    if (!this.firstFrame && this.prerollAt === null) this.prerollAt = this.now()
     this.metrics.ad_count += 1
     this.event('adplay')
   }
@@ -375,7 +444,15 @@ export class ViewTracker {
   /** The ad's frames are moving. */
   adPlaying(): void {
     if (this.state !== 'ad' || this.adPlayingSince !== null) return
-    this.adPlayingSince = this.now()
+    const now = this.now()
+    this.adPlayingSince = now
+    if (!this.firstFrame && this.metrics.ad_startup_ms === null) {
+      const asked = this.prerollAt ?? this.adBreakAt
+      this.metrics.ad_startup_ms = Math.round(now - asked)
+      // Loading the ad: from the last ad response (or the ad's start), never before playback was asked for.
+      this.metrics.preroll_load_ms = Math.round(now - Math.max(this.adResponseAt ?? asked, this.playRequestedAt ?? -Infinity))
+      this.metrics.video_startup_ms = Math.round(now - (this.playRequestedAt ?? this.t0))
+    }
     this.event('adplaying')
   }
 
@@ -432,16 +509,20 @@ export class ViewTracker {
         duration_ms: this.video.durationMs, stream_type: this.video.streamType ?? 'on-demand',
         source_type: this.video.sourceType, source_host: this.video.sourceHost,
         cdn: this.cdn || undefined, drm_type: this.drmType || undefined,
+        content_type: this.video.contentType, language_code: this.video.languageCode,
+        variant_name: this.video.variantName, encoding_variant: this.video.encodingVariant,
       },
       player: {
         name: this.player.name, version: this.player.version, autoplay: Boolean(this.player.autoplay),
-        width: this.playerWidth, height: this.playerHeight, fullscreen: this.fullscreen, pip: this.pip,
+        width: this.playerWidth, height: this.playerHeight, fullscreen: this.fullscreen, pip: this.pip, captions: this.captionsOn,
       },
+      ...(this.video.experimentName ? { experiment_name: this.video.experimentName } : {}),
+      ...(this.video.subPropertyId ? { sub_property_id: this.video.subPropertyId } : {}),
       ...(this.page ? { page: this.page } : {}),
       ...(this.video.viewSessionId ? { view_session_id: this.video.viewSessionId } : {}),
       // Times add up in fractions of a millisecond; the beacon carries whole ones.
       metrics: Object.fromEntries(Object.entries(this.metrics).map(([key, value]) =>
-        [key, typeof value === 'number' && key !== 'max_upscale_pct' ? Math.round(value) : value])),
+        [key, typeof value === 'number' && key !== 'max_upscale_pct' && key !== 'max_downscale_pct' ? Math.round(value) : value])),
       custom: Object.fromEntries(Object.entries(this.video.custom ?? {}).filter(([, value]) => value)) as Record<string, string>,
       error: this.error,
       events: this.events.slice(0, maxEvents),
@@ -485,11 +566,19 @@ export class ViewTracker {
       this.bitratePlayingMs += ms
     }
     if (this.videoWidth && this.videoHeight && this.playerWidth && this.playerHeight) {
+      // How much the dimension that fills the player first is stretched (320 → 640: 100 %) or shrunk.
       const scale = Math.min(this.playerWidth / this.videoWidth, this.playerHeight / this.videoHeight)
       if (scale > 1) {
+        const pct = Math.round((scale - 1) * 1000) / 10
         m.upscale_ms += ms
-        m.max_upscale_pct = Math.max(m.max_upscale_pct, Math.round((scale - 1) * 1000) / 10)
-      } else if (scale < 1) m.downscale_ms += ms
+        m.upscale_pct_ms += pct * ms
+        m.max_upscale_pct = Math.max(m.max_upscale_pct, pct)
+      } else if (scale < 1) {
+        const pct = Math.round((1 / scale - 1) * 1000) / 10
+        m.downscale_ms += ms
+        m.downscale_pct_ms += pct * ms
+        m.max_downscale_pct = Math.max(m.max_downscale_pct, pct)
+      }
     }
   }
 }

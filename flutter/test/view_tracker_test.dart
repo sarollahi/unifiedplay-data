@@ -68,6 +68,60 @@ void main() {
     expect(typesOf(snapshot).where((t) => t == 'cdnchange').length, 2);
   });
 
+  test('times pre-roll requests, loading and startup after the play request', () {
+    final view = tracker(const VideoInfo(id: 'v', experimentName: 'ladder-b', contentType: 'episode', custom: {10: 'tenth'}));
+    view.adRequest();
+    time += 300;
+    view.play();
+    time += 200;
+    view.adResponse();
+    time += 100;
+    view.adRequest();
+    time += 150;
+    view.adResponse();
+    time += 50;
+    view.adBreakStart();
+    view.adStart();
+    time += 400;
+    view.adPlaying();
+    time += 10000;
+    view.adEnd();
+    view.adBreakEnd();
+    time += 700;
+    view.playing();
+    final snapshot = view.snapshot();
+    final m = metricsOf(snapshot);
+    expect(m['preroll_requests'], 2);
+    expect(m['preroll_request_ms'], 350);
+    expect(m['ad_startup_ms'], 400);
+    expect(m['preroll_load_ms'], 450);
+    expect(m['video_startup_ms'], 900);
+    expect(m['content_startup_ms'], 1200);
+    expect(snapshot['experiment_name'], 'ladder-b');
+    expect((snapshot['video']! as Map)['content_type'], 'episode');
+    expect(snapshot['custom'], {'10': 'tenth'});
+  });
+
+  test('weighs scaling amounts by time and keeps business exceptions apart', () {
+    final view = tracker();
+    view.playerSize(1280, 720);
+    view.rendition(800, 640, 360);
+    view.play();
+    view.playing();
+    time += 1000;
+    view.rendition(4000, 2560, 1440);
+    time += 3000;
+    view.captions(true);
+    view.failed('geo', 'Not in your country', businessException: true);
+    final snapshot = view.snapshot();
+    final m = metricsOf(snapshot);
+    expect(m['upscale_pct_ms'], 100000);
+    expect(m['downscale_pct_ms'], 300000);
+    expect(m['max_downscale_pct'], 100);
+    expect((snapshot['error']! as Map)['business_exception'], true);
+    expect((snapshot['player']! as Map)['captions'], true);
+  });
+
   test('sends to the beacon domain and stops on a bad key', () async {
     final urls = <Uri>[];
     final data = DataClient(const DataConfig(key: 'up_data_test', beaconDomain: 'data.example.com'), deviceId: 'd1',

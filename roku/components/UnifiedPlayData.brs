@@ -27,7 +27,7 @@ sub UPD_Run()
     m.sourceAt = invalid
     m.readyAt = invalid
     m.clock = CreateObject("roTimespan")
-    for each field in ["control", "state", "content", "position", "streamingSegment", "downloadedSegment", "errorCode", "timeToStartStreaming", "seek"]
+    for each field in ["control", "state", "content", "position", "streamingSegment", "downloadedSegment", "errorCode", "timeToStartStreaming", "seek", "globalCaptionMode"]
         video.ObserveField(field, port)
     end for
     m.top.ObserveField("adEvent", port)
@@ -156,6 +156,8 @@ function UPD_OnField(field as string, data as dynamic) as boolean
         end if
     else if field = "seek" then
         view.seeking()
+    else if field = "globalCaptionMode" then
+        view.captions(data = "On" or data = "Instant replay")
     else if field = "position" then
         view.playhead(data * 1000)
     else if field = "streamingSegment" then
@@ -194,7 +196,7 @@ end sub
 sub UPD_Ad(event as dynamic)
     if event = invalid or event.type = invalid then return
     t = event.type
-    if t = "adbreakstart" or t = "adstart" or t = "aderror" then
+    if t = "adbreakstart" or t = "adstart" or t = "aderror" or t = "adrequest" then
         view = UPD_Current()
     else
         view = m.view
@@ -205,6 +207,10 @@ sub UPD_Ad(event as dynamic)
         UPD_Send()
     else if t = "adstart" then
         view.adStart()
+    else if t = "adrequest" then
+        view.adRequest()
+    else if t = "adresponse" then
+        view.adResponse()
     else if t = "adplaying" then
         view.adPlaying()
     else if t = "adpause" then

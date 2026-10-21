@@ -3,7 +3,8 @@
 ' (ViewTracker.kt) and iOS (ViewTracker.swift) SDKs do the same; change them together.
 '
 ' tracker = UPD_NewTracker(video, player, clock)
-'   video:  { id, title, series_id, series_title, duration_ms, stream_type, source_type, source_host, cdn, drm_type, view_session_id, custom }
+'   video:  { id, title, series_id, series_title, duration_ms, stream_type, source_type, source_host, cdn, drm_type, view_session_id,
+'             content_type, language_code, variant_name, encoding_variant, experiment_name, sub_property_id, custom ("1".."10") }
 '   player: { name, version, autoplay }
 '   clock:  invalid (a real clock) or { ms: 0 } (tests move clock.ms)
 
@@ -15,7 +16,8 @@ function UPD_NewTracker(video as object, player as object, clock = invalid as dy
         kbps: invalid, bitrateMs: 0#, bitratePlayingMs: 0#, videoWidth: invalid, videoHeight: invalid,
         playerWidth: invalid, playerHeight: invalid,
         beforeAd: "idle", adBreakAt: 0#, startupAdMs: 0#, adPlayingSince: invalid,
-        cdn: UPD_Text(video.cdn), drmType: UPD_Text(video.drm_type), fullscreen: false, pip: false, mode: "standard",
+        cdn: UPD_Text(video.cdn), drmType: UPD_Text(video.drm_type), fullscreen: false, pip: false, mode: "standard", captionsOn: false,
+        prerollAt: invalid, adRequestAt: invalid, adResponseAt: invalid,
         metrics: {
             player_startup_ms: invalid, video_startup_ms: invalid, watch_ms: 0#, playing_ms: 0#,
             rebuffer_count: 0, rebuffer_ms: 0#, seek_count: 0, seek_ms: 0#, playhead_ms: 0#,
@@ -26,7 +28,9 @@ function UPD_NewTracker(video as object, player as object, clock = invalid as dy
             request_completed: 0, request_failed: 0, request_canceled: 0,
             request_failed_manifest: 0, request_failed_media: 0, request_failed_encryption: 0,
             request_media_completed: 0, request_media_bytes: 0#, request_media_ms: 0#,
-            request_media_ttfb_ms: 0#, request_media_ttfb_count: 0, request_media_max_ttfb_ms: 0#
+            request_media_ttfb_ms: 0#, request_media_ttfb_count: 0, request_media_max_ttfb_ms: 0#,
+            content_startup_ms: invalid, ad_startup_ms: invalid, preroll_request_ms: invalid, preroll_load_ms: invalid,
+            preroll_requests: 0, upscale_pct_ms: 0#, downscale_pct_ms: 0#, max_downscale_pct: 0#
         },
         now: UPD_Now, event: UPD_Event, move: UPD_Move, account: UPD_Account, stopAdClock: UPD_StopAdClock,
         playerStartup: UPD_PlayerStartup, play: UPD_Play, playing: UPD_Playing, pause: UPD_Pause,
@@ -36,7 +40,8 @@ function UPD_NewTracker(video as object, player as object, clock = invalid as dy
         adBreakStart: UPD_AdBreakStart, adStart: UPD_AdStart, adPlaying: UPD_AdPlaying, adPause: UPD_AdPause,
         adEnd: UPD_AdEnd, adError: UPD_AdError, adBreakEnd: UPD_AdBreakEnd,
         requestCompleted: UPD_RequestCompleted, requestFailed: UPD_RequestFailed, requestCanceled: UPD_RequestCanceled,
-        playbackMode: UPD_PlaybackMode, setDrmType: UPD_SetDrmType,
+        playbackMode: UPD_PlaybackMode, setDrmType: UPD_SetDrmType, captions: UPD_Captions,
+        adRequest: UPD_AdRequest, adResponse: UPD_AdResponse,
         snapshot: UPD_Snapshot, sent: UPD_Sent
     }
     tracker.startedAt = CreateObject("roDateTime").ToISOString()
@@ -92,11 +97,17 @@ sub UPD_Account()
         scaleH = m.playerHeight / m.videoHeight
         scale = scaleW
         if scaleH < scale then scale = scaleH
+        ' How much the dimension that fills the player first is stretched (320 to 640: 100 %) or shrunk.
         if scale > 1 then
+            pct = Int((scale - 1) * 1000 + 0.5) / 10
             m.metrics.upscale_ms = m.metrics.upscale_ms + ms
-            m.metrics.max_upscale_pct = UPD_Max(m.metrics.max_upscale_pct, Int((scale - 1) * 1000 + 0.5) / 10)
+            m.metrics.upscale_pct_ms = m.metrics.upscale_pct_ms + pct * ms
+            m.metrics.max_upscale_pct = UPD_Max(m.metrics.max_upscale_pct, pct)
         else if scale < 1 then
+            pct = Int((1 / scale - 1) * 1000 + 0.5) / 10
             m.metrics.downscale_ms = m.metrics.downscale_ms + ms
+            m.metrics.downscale_pct_ms = m.metrics.downscale_pct_ms + pct * ms
+            m.metrics.max_downscale_pct = UPD_Max(m.metrics.max_downscale_pct, pct)
         end if
     end if
 end sub
@@ -133,7 +144,10 @@ sub UPD_Playing()
         m.firstFrame = true
         startedAt = m.t0
         if m.playRequestedAt <> invalid then startedAt = m.playRequestedAt
-        m.metrics.video_startup_ms = m.now() - startedAt - m.startupAdMs
+        since = m.now() - startedAt
+        ' Video startup ends at the first frame of a pre-roll, if one came first; content startup leaves ads out.
+        if m.metrics.video_startup_ms = invalid then m.metrics.video_startup_ms = since
+        m.metrics.content_startup_ms = since - m.startupAdMs
     end if
     if m.state = "rebuffering" then m.event("rebufferend", invalid)
     if m.state <> "playing" then m.event("playing", invalid)
@@ -204,12 +218,45 @@ sub UPD_LiveLatency(ms as dynamic)
     m.metrics.live_latency_ms = UPD_Max(0#, ms)
 end sub
 
-sub UPD_Failed(code as string, message as string, fatal = true as boolean)
+' fatal: it stopped playback. businessException: your own rule stopped it (geo-block, paywall): no failure.
+sub UPD_Failed(code as string, message as string, fatal = true as boolean, businessException = false as boolean)
     if m.ended then return
-    m.event("error", { code: code, message: message, fatal: fatal })
+    data = { code: code, message: message, fatal: fatal }
+    if businessException then data.business_exception = true
+    m.event("error", data)
     if not fatal then return
-    m.error = { code: code, message: message, fatal: fatal }
+    m.error = { code: code, message: message, fatal: fatal, business_exception: businessException }
     m.end()
+end sub
+
+sub UPD_Captions(isOn as boolean)
+    if not isOn or m.captionsOn then return
+    m.captionsOn = true
+    m.event("captions", { on: true })
+end sub
+
+' An ad request went out (VAST/VMAP): before the first pre-roll plays, its time is pre-roll request time.
+sub UPD_AdRequest()
+    if m.ended then return
+    if not m.firstFrame and m.metrics.ad_startup_ms = invalid then
+        m.metrics.preroll_requests = m.metrics.preroll_requests + 1
+        if m.adRequestAt = invalid then m.adRequestAt = m.now()
+    end if
+    m.event("adrequest", invalid)
+end sub
+
+sub UPD_AdResponse()
+    if m.ended then return
+    now = m.now()
+    if m.adRequestAt <> invalid and m.playRequestedAt <> invalid and m.metrics.ad_startup_ms = invalid then
+        ' Only time after playback was asked for counts.
+        before = 0#
+        if m.metrics.preroll_request_ms <> invalid then before = m.metrics.preroll_request_ms
+        m.metrics.preroll_request_ms = before + now - UPD_Max(m.adRequestAt, m.playRequestedAt)
+    end if
+    m.adRequestAt = invalid
+    m.adResponseAt = now
+    m.event("adresponse", invalid)
 end sub
 
 sub UPD_Completed()
@@ -241,13 +288,28 @@ end sub
 sub UPD_AdStart()
     if m.ended then return
     if m.state <> "ad" then m.adBreakStart()
+    if not m.firstFrame and m.prerollAt = invalid then m.prerollAt = m.now()
     m.metrics.ad_count = m.metrics.ad_count + 1
     m.event("adplay", invalid)
 end sub
 
 sub UPD_AdPlaying()
     if m.state <> "ad" or m.adPlayingSince <> invalid then return
-    m.adPlayingSince = m.now()
+    now = m.now()
+    m.adPlayingSince = now
+    if not m.firstFrame and m.metrics.ad_startup_ms = invalid then
+        asked = m.adBreakAt
+        if m.prerollAt <> invalid then asked = m.prerollAt
+        m.metrics.ad_startup_ms = now - asked
+        ' Loading the ad: from the last ad response (or the ad's start), never before playback was asked for.
+        loadFrom = asked
+        if m.adResponseAt <> invalid then loadFrom = m.adResponseAt
+        if m.playRequestedAt <> invalid then loadFrom = UPD_Max(loadFrom, m.playRequestedAt)
+        m.metrics.preroll_load_ms = now - loadFrom
+        startedAt = m.t0
+        if m.playRequestedAt <> invalid then startedAt = m.playRequestedAt
+        m.metrics.video_startup_ms = now - startedAt
+    end if
     m.event("adplaying", invalid)
 end sub
 
@@ -363,7 +425,7 @@ function UPD_Snapshot(maxEvents = 25 as integer) as object
     metrics = {}
     for each key in m.metrics
         value = m.metrics[key]
-        if key = "max_upscale_pct" or value = invalid then metrics[key] = value else metrics[key] = UPD_Whole(value)
+        if key = "max_upscale_pct" or key = "max_downscale_pct" or value = invalid then metrics[key] = value else metrics[key] = UPD_Whole(value)
     end for
     events = []
     for each entry in m.events
@@ -386,12 +448,15 @@ function UPD_Snapshot(maxEvents = 25 as integer) as object
     snapshot = {
         view_id: m.viewId, seq: m.seq, started_at: m.startedAt, ended: m.ended,
         video: { id: v.id, title: v.title, series_id: v.series_id, series_title: v.series_title, duration_ms: v.duration_ms,
-                 stream_type: streamType, source_type: v.source_type, source_host: v.source_host, cdn: cdn, drm_type: drm },
+                 stream_type: streamType, source_type: v.source_type, source_host: v.source_host, cdn: cdn, drm_type: drm,
+                 content_type: v.content_type, language_code: v.language_code, variant_name: v.variant_name, encoding_variant: v.encoding_variant },
         player: { name: m.player.name, version: m.player.version, autoplay: m.player.autoplay = true,
-                  width: m.playerWidth, height: m.playerHeight, fullscreen: m.fullscreen, pip: m.pip },
+                  width: m.playerWidth, height: m.playerHeight, fullscreen: m.fullscreen, pip: m.pip, captions: m.captionsOn },
         metrics: metrics, custom: custom, error: m.error, events: events
     }
     if v.view_session_id <> invalid then snapshot.view_session_id = v.view_session_id
+    if v.experiment_name <> invalid then snapshot.experiment_name = v.experiment_name
+    if v.sub_property_id <> invalid then snapshot.sub_property_id = v.sub_property_id
     return snapshot
 end function
 

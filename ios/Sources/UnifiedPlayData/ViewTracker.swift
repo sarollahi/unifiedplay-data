@@ -16,12 +16,26 @@ public struct VideoInfo: Sendable {
     public var drmType: String?
     /// Your own id for this view, to join it with CDN logs: give your CMCD session id the same value.
     public var viewSessionID: String?
-    /// Up to five of your own dimensions (1...5: an experiment, a page type…); the Console breaks views down by them.
+    /// episode, movie, trailer, clip, live…
+    public var contentType: String?
+    /// The audio language, e.g. en, sv.
+    public var languageCode: String?
+    /// Which variant of the video (a cut, a dub).
+    public var variantName: String?
+    /// Which encoding ladder or settings, for comparing encodings.
+    public var encodingVariant: String?
+    /// An A/B test this view is in.
+    public var experimentName: String?
+    /// A part of your service (a site, a customer, a channel).
+    public var subPropertyID: String?
+    /// Up to ten of your own dimensions (1...10); the Console breaks views down by them.
     public var custom: [Int: String]
 
     public init(id: String? = nil, title: String? = nil, seriesID: String? = nil, seriesTitle: String? = nil,
                 durationMs: Int? = nil, streamType: String = "on-demand", sourceType: String? = nil, sourceHost: String? = nil,
                 cdn: String? = nil, drmType: String? = nil, viewSessionID: String? = nil,
+                contentType: String? = nil, languageCode: String? = nil, variantName: String? = nil, encodingVariant: String? = nil,
+                experimentName: String? = nil, subPropertyID: String? = nil,
                 custom: [Int: String] = [:]) {
         self.id = id
         self.title = title
@@ -34,6 +48,12 @@ public struct VideoInfo: Sendable {
         self.cdn = cdn
         self.drmType = drmType
         self.viewSessionID = viewSessionID
+        self.contentType = contentType
+        self.languageCode = languageCode
+        self.variantName = variantName
+        self.encodingVariant = encodingVariant
+        self.experimentName = experimentName
+        self.subPropertyID = subPropertyID
         self.custom = custom
     }
 }
@@ -124,6 +144,11 @@ public final class ViewTracker {
     private var fullscreen = false
     private var pip = false
     private var mode = "standard"
+    private var captionsOn = false
+    // Pre-roll (spec: Startup): when it was asked to play, the open ad request, the last ad response.
+    private var prerollAt: Double?
+    private var adRequestAt: Double?
+    private var adResponseAt: Double?
     public private(set) var ended = false
 
     private var playerStartupMs: Double?
@@ -158,6 +183,14 @@ public final class ViewTracker {
     private var requestMediaTtfbMs = 0.0
     private var requestMediaTtfbCount = 0
     private var requestMediaMaxTtfbMs = 0.0
+    private var contentStartupMs: Double?
+    private var adStartupMs: Double?
+    private var prerollRequestMs: Double?
+    private var prerollLoadMs: Double?
+    private var prerollRequests = 0
+    private var upscalePctMs = 0.0
+    private var downscalePctMs = 0.0
+    private var maxDownscalePct = 0.0
 
     /// `now` is in milliseconds; tests pass their own clock.
     public init(video: VideoInfo, player: PlayerInfo, now: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime * 1000 }) {
@@ -209,6 +242,36 @@ public final class ViewTracker {
         event("requestcanceled", ["type": json(request.type), "hostname": json(request.hostname)])
     }
 
+    /// Captions shown at some point of the view.
+    public func captions(_ on: Bool) {
+        guard on, !captionsOn else { return }
+        captionsOn = true
+        event("captions", ["on": true])
+    }
+
+    /// An ad request went out (VAST/VMAP). Before the first pre-roll plays, its time is pre-roll request time.
+    public func adRequest() {
+        guard !ended else { return }
+        if !firstFrame, adStartupMs == nil {
+            prerollRequests += 1
+            if adRequestAt == nil { adRequestAt = now() }
+        }
+        event("adrequest")
+    }
+
+    /// The ad response came back and was read.
+    public func adResponse() {
+        guard !ended else { return }
+        let current = now()
+        if let requested = adRequestAt, let played = playRequestedAt, adStartupMs == nil {
+            // Only time after playback was asked for counts.
+            prerollRequestMs = (prerollRequestMs ?? 0) + current - max(requested, played)
+        }
+        adRequestAt = nil
+        adResponseAt = current
+        event("adresponse")
+    }
+
     /// standard, fullscreen, pip, or your own name.
     public func playbackMode(_ next: String) {
         guard next != mode else { return }
@@ -250,7 +313,10 @@ public final class ViewTracker {
         guard !ended, state != .ad else { return }
         if !firstFrame {
             firstFrame = true
-            videoStartupMs = now() - (playRequestedAt ?? t0) - startupAdMs
+            let since = now() - (playRequestedAt ?? t0)
+            // Video startup ends at the first frame of a pre-roll, if one came first; content startup leaves ads out.
+            if videoStartupMs == nil { videoStartupMs = since }
+            contentStartupMs = since - startupAdMs
         }
         if state == .rebuffering { event("rebufferend") }
         if state != .playing { event("playing") }
@@ -325,11 +391,15 @@ public final class ViewTracker {
         if ms.isFinite { liveLatencyMs = max(0, ms) }
     }
 
-    public func failed(code: String, message: String, fatal: Bool = true) {
+    /// An error. fatal: it stopped playback. businessException: your own rule stopped it (geo-block,
+    /// paywall, too many streams): no playback failure.
+    public func failed(code: String, message: String, fatal: Bool = true, businessException: Bool = false) {
         guard !ended else { return }
-        event("error", ["code": code, "message": message, "fatal": fatal])
+        var data: [String: Any] = ["code": code, "message": message, "fatal": fatal]
+        if businessException { data["business_exception"] = true }
+        event("error", data)
         guard fatal else { return }
-        error = ["code": code, "message": message, "fatal": true]
+        error = ["code": code, "message": message, "fatal": fatal, "business_exception": businessException]
         end()
     }
 
@@ -367,6 +437,7 @@ public final class ViewTracker {
     public func adStart() {
         guard !ended else { return }
         if state != .ad { adBreakStart() }
+        if !firstFrame, prerollAt == nil { prerollAt = now() }
         adCount += 1
         event("adplay")
     }
@@ -374,7 +445,15 @@ public final class ViewTracker {
     /// The ad's frames are moving.
     public func adPlaying() {
         guard state == .ad, adPlayingSince == nil else { return }
-        adPlayingSince = now()
+        let current = now()
+        adPlayingSince = current
+        if !firstFrame, adStartupMs == nil {
+            let asked = prerollAt ?? adBreakAt
+            adStartupMs = current - asked
+            // Loading the ad: from the last ad response (or the ad's start), never before playback was asked for.
+            prerollLoadMs = current - max(adResponseAt ?? asked, playRequestedAt ?? -.infinity)
+            videoStartupMs = current - (playRequestedAt ?? t0)
+        }
         event("adplaying")
     }
 
@@ -455,6 +534,14 @@ public final class ViewTracker {
             "request_media_ttfb_ms": Int(requestMediaTtfbMs.rounded()),
             "request_media_ttfb_count": requestMediaTtfbCount,
             "request_media_max_ttfb_ms": Int(requestMediaMaxTtfbMs.rounded()),
+            "content_startup_ms": whole(contentStartupMs),
+            "ad_startup_ms": whole(adStartupMs),
+            "preroll_request_ms": whole(prerollRequestMs),
+            "preroll_load_ms": whole(prerollLoadMs),
+            "preroll_requests": prerollRequests,
+            "upscale_pct_ms": Int(upscalePctMs.rounded()),
+            "downscale_pct_ms": Int(downscalePctMs.rounded()),
+            "max_downscale_pct": maxDownscalePct,
         ]
         return [
             "view_id": viewID,
@@ -466,12 +553,16 @@ public final class ViewTracker {
                 "series_title": json(video.seriesTitle), "duration_ms": json(video.durationMs),
                 "stream_type": video.streamType, "source_type": json(video.sourceType), "source_host": json(video.sourceHost),
                 "cdn": json(cdn.isEmpty ? nil : cdn), "drm_type": json(drmType.isEmpty ? nil : drmType),
+                "content_type": json(video.contentType), "language_code": json(video.languageCode),
+                "variant_name": json(video.variantName), "encoding_variant": json(video.encodingVariant),
             ],
             "player": [
                 "name": player.name, "version": json(player.version), "autoplay": player.autoplay,
-                "width": json(playerWidth), "height": json(playerHeight), "fullscreen": fullscreen, "pip": pip,
+                "width": json(playerWidth), "height": json(playerHeight), "fullscreen": fullscreen, "pip": pip, "captions": captionsOn,
             ],
             "view_session_id": json(video.viewSessionID),
+            "experiment_name": json(video.experimentName),
+            "sub_property_id": json(video.subPropertyID),
             "metrics": metrics,
             "custom": Dictionary(uniqueKeysWithValues: video.custom.filter { !$0.value.isEmpty }.map { (String($0.key), $0.value) }),
             "error": json(error),
@@ -518,11 +609,17 @@ public final class ViewTracker {
         }
         guard let vw = videoWidth, let vh = videoHeight, let pw = playerWidth, let ph = playerHeight, vw > 0, vh > 0 else { return }
         let scale = min(Double(pw) / Double(vw), Double(ph) / Double(vh))
+        // How much the dimension that fills the player first is stretched (320 → 640: 100 %) or shrunk.
         if scale > 1 {
+            let pct = ((scale - 1) * 1000).rounded() / 10
             upscaleMs += ms
-            maxUpscalePct = max(maxUpscalePct, ((scale - 1) * 1000).rounded() / 10)
+            upscalePctMs += pct * ms
+            maxUpscalePct = max(maxUpscalePct, pct)
         } else if scale < 1 {
+            let pct = ((1 / scale - 1) * 1000).rounded() / 10
             downscaleMs += ms
+            downscalePctMs += pct * ms
+            maxDownscalePct = max(maxDownscalePct, pct)
         }
     }
 }

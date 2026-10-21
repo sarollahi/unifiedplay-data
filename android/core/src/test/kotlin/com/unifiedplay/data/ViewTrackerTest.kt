@@ -75,7 +75,10 @@ class ViewTrackerTest {
         advance(5_000); view.adEnd(); view.adBreakEnd(); advance(100); view.playing(); advance(1_000)
         val snapshot = view.snapshot()
         val metrics = snapshot.metrics()
-        assertEquals(500L, metrics["video_startup_ms"])
+        // Video startup ends at the pre-roll's first frame; content startup leaves the ads out.
+        assertEquals(0L, metrics["video_startup_ms"])
+        assertEquals(500L, metrics["content_startup_ms"])
+        assertEquals(0L, metrics["ad_startup_ms"])
         assertEquals(2, metrics["ad_break_count"])
         assertEquals(3, metrics["ad_count"])
         assertEquals(1, metrics["ad_error_count"])
@@ -84,6 +87,52 @@ class ViewTrackerTest {
         assertEquals(11_500L, metrics["watch_ms"])
         assertEquals(0, metrics["rebuffer_count"])
         assertEquals(mapOf("1" to "experiment-b"), snapshot["custom"])
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    @Test
+    fun timesPreRollRequestsLoadingAndStartupAfterThePlayRequest() {
+        val view = ViewTracker(VideoInfo(id = "v", experimentName = "ladder-b", contentType = "episode", custom = mapOf(10 to "tenth")), PlayerInfo("test")) { time }
+        view.adRequest()
+        advance(300); view.play()
+        advance(200); view.adResponse()
+        advance(100); view.adRequest(); advance(150); view.adResponse()
+        advance(50); view.adBreakStart(); view.adStart()
+        advance(400); view.adPlaying()
+        advance(10_000); view.adEnd(); view.adBreakEnd()
+        advance(700); view.playing()
+        val snapshot = view.snapshot()
+        val metrics = snapshot.metrics()
+        assertEquals(2, metrics["preroll_requests"])
+        assertEquals(350L, metrics["preroll_request_ms"])
+        assertEquals(400L, metrics["ad_startup_ms"])
+        assertEquals(450L, metrics["preroll_load_ms"])
+        assertEquals(900L, metrics["video_startup_ms"])
+        assertEquals(1200L, metrics["content_startup_ms"])
+        assertEquals("ladder-b", snapshot["experiment_name"])
+        assertEquals("episode", (snapshot["video"] as Map<String, Any?>)["content_type"])
+        assertEquals(mapOf("10" to "tenth"), snapshot["custom"])
+    }
+
+    @Test
+    fun weighsScalingAmountsByTimeAndKeepsBusinessExceptionsApart() {
+        val view = tracker()
+        view.playerSize(1280, 720)
+        view.rendition(800.0, 640, 360)
+        view.play(); view.playing()
+        advance(1000)
+        view.rendition(4000.0, 2560, 1440)
+        advance(3000)
+        view.captions(true)
+        view.failed("geo", "Not in your country", fatal = true, businessException = true)
+        val snapshot = view.snapshot()
+        val metrics = snapshot.metrics()
+        assertEquals(100_000L, metrics["upscale_pct_ms"])
+        assertEquals(300_000L, metrics["downscale_pct_ms"])
+        assertEquals(100.0, metrics["max_downscale_pct"])
+        assertEquals(mapOf("code" to "geo", "message" to "Not in your country", "fatal" to true, "business_exception" to true), snapshot["error"])
+        @Suppress("UNCHECKED_CAST")
+        assertEquals(true, (snapshot["player"] as Map<String, Any?>)["captions"])
     }
 
     @Test

@@ -11,6 +11,8 @@ interface ShakaLike {
   getVariantTracks(): ShakaVariant[]
   getNetworkingEngine?(): { registerResponseFilter(filter: ResponseFilter): void; unregisterResponseFilter(filter: ResponseFilter): void } | null
   drmInfo?(): { keySystem?: string } | null
+  isLive?(): boolean
+  getStats?(): { liveLatency?: number }
 }
 
 // shaka.net.NetworkingEngine.RequestType and AdvancedRequestType.
@@ -38,6 +40,8 @@ export function trackShaka(monitor: VideoMonitor, shaka: ShakaLike): () => void 
   const variant = () => {
     const active = shaka.getVariantTracks().find(track => track.active)
     if (active) monitor.rendition(active.bandwidth / 1000, active.width, active.height)
+    const latency = shaka.isLive?.() ? shaka.getStats?.().liveLatency : undefined
+    if (latency && latency > 0) monitor.liveLatency(latency * 1000)
     const drm = drmTypeOf(shaka.drmInfo?.()?.keySystem)
     if (drm) monitor.setDrmType(drm)
   }

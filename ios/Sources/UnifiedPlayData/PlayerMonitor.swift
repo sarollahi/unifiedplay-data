@@ -15,6 +15,15 @@ public protocol AdTarget: AnyObject {
     func adError(code: String, message: String)
     /// The ads gave the video back.
     func adBreakEnd()
+    /// An ad request went out (VAST/VMAP): before the first pre-roll, its time is pre-roll request time.
+    func adRequest()
+    /// The ad response came back and was read.
+    func adResponse()
+}
+
+public extension AdTarget {
+    func adRequest() {}
+    func adResponse() {}
 }
 
 /// What every player monitor shares: a view starts when playback of a source is asked for (so a
@@ -34,6 +43,7 @@ open class PlayerMonitor: AdTarget {
     private var early: [(RequestKind, RequestInfo)] = []
     private var drmType = ""
     private var mode = "standard"
+    private var captionsOn = false
 
     public init(client: DataClient, player: PlayerInfo) {
         self.client = client
@@ -93,6 +103,7 @@ open class PlayerMonitor: AdTarget {
         if let sourceAt, let readyAt { next.playerStartup(readyAt - sourceAt) }
         if !drmType.isEmpty { next.setDrmType(drmType) }
         if mode != "standard" { next.playbackMode(mode) }
+        if captionsOn { next.captions(true) }
         for (kind, request) in early { record(next, kind, request) }
         early = []
         onNewView(next)
@@ -117,6 +128,21 @@ open class PlayerMonitor: AdTarget {
         drmType = type
         view?.setDrmType(type)
     }
+
+    /// Captions turned on or off.
+    public func captions(_ on: Bool) {
+        captionsOn = captionsOn || on
+        view?.captions(on)
+    }
+
+    /// Your own rule stopped playback (geo-block, paywall, too many streams): the view ends without failing.
+    public func businessException(code: String, message: String = "") {
+        current()?.failed(code: code, message: message, fatal: true, businessException: true)
+        client.flush()
+    }
+
+    public func adRequest() { current()?.adRequest() }
+    public func adResponse() { view?.adResponse() }
 
     /// The app's player went fullscreen ("fullscreen"), picture-in-picture ("pip") or back ("standard").
     public func playbackMode(_ next: String) {

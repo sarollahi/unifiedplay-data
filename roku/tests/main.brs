@@ -6,6 +6,8 @@ sub main()
     failures = failures + addsUpRequestsCountsFailuresByTypeAndNamesTheCdn()
     failures = failures + keepsAdsOutOfVideoTime()
     failures = failures + readsTheVideoNodesSegments()
+    failures = failures + timesPreRollRequestsAndLoading()
+    failures = failures + weighsScalingAndKeepsBusinessExceptionsApart()
     if failures = 0 then print "ALL PASSED" else print "FAILED: "; failures
 end sub
 
@@ -92,7 +94,8 @@ function keepsAdsOutOfVideoTime() as integer
     clock.ms = clock.ms + 700 : view.playing() : clock.ms = clock.ms + 1000
     s = view.snapshot(100)
     f = 0
-    f = f + check("video_startup_ms", s.metrics.video_startup_ms, 700)
+    f = f + check("video_startup_ms", s.metrics.video_startup_ms, 0)
+    f = f + check("content_startup_ms", s.metrics.content_startup_ms, 700)
     f = f + check("ad_watch_ms", s.metrics.ad_watch_ms, 15000)
     f = f + check("ad_count", s.metrics.ad_count, 1)
     f = f + check("watch_ms", s.metrics.watch_ms, 1700)
@@ -114,5 +117,52 @@ function readsTheVideoNodesSegments() as integer
     f = f + check("request_media_ms", s.metrics.request_media_ms, 500)
     f = f + check("request_failed_media", s.metrics.request_failed_media, 1)
     if f = 0 then print "ok - reads the Video node's segments"
+    return f
+end function
+
+function timesPreRollRequestsAndLoading() as integer
+    clock = { ms: 0# }
+    view = UPD_NewTracker({ id: "v", experiment_name: "ladder-b", content_type: "episode" }, { name: "test" }, clock)
+    view.adRequest()
+    clock.ms = clock.ms + 300 : view.play()
+    clock.ms = clock.ms + 200 : view.adResponse()
+    clock.ms = clock.ms + 100 : view.adRequest() : clock.ms = clock.ms + 150 : view.adResponse()
+    clock.ms = clock.ms + 50 : view.adBreakStart() : view.adStart()
+    clock.ms = clock.ms + 400 : view.adPlaying()
+    clock.ms = clock.ms + 10000 : view.adEnd() : view.adBreakEnd()
+    clock.ms = clock.ms + 700 : view.playing()
+    s = view.snapshot(100)
+    f = 0
+    f = f + check("preroll_requests", s.metrics.preroll_requests, 2)
+    f = f + check("preroll_request_ms", s.metrics.preroll_request_ms, 350)
+    f = f + check("ad_startup_ms", s.metrics.ad_startup_ms, 400)
+    f = f + check("preroll_load_ms", s.metrics.preroll_load_ms, 450)
+    f = f + check("video_startup_ms", s.metrics.video_startup_ms, 900)
+    f = f + check("content_startup_ms", s.metrics.content_startup_ms, 1200)
+    f = f + check("experiment_name", s.experiment_name, "ladder-b")
+    f = f + check("content_type", s.video.content_type, "episode")
+    if f = 0 then print "ok - times pre-roll requests, loading and startup"
+    return f
+end function
+
+function weighsScalingAndKeepsBusinessExceptionsApart() as integer
+    clock = { ms: 0# }
+    view = UPD_NewTracker({ id: "v" }, { name: "test" }, clock)
+    view.playerSize(1280, 720)
+    view.rendition(800, 640, 360)
+    view.play() : view.playing()
+    clock.ms = clock.ms + 1000
+    view.rendition(4000, 2560, 1440)
+    clock.ms = clock.ms + 3000
+    view.captions(true)
+    view.failed("geo", "Not in your country", true, true)
+    s = view.snapshot(100)
+    f = 0
+    f = f + check("upscale_pct_ms", s.metrics.upscale_pct_ms, 100000)
+    f = f + check("downscale_pct_ms", s.metrics.downscale_pct_ms, 300000)
+    f = f + check("max_downscale_pct", s.metrics.max_downscale_pct, 100)
+    f = f + check("business_exception", s.error.business_exception, true)
+    f = f + check("captions", s.player.captions, true)
+    if f = 0 then print "ok - weighs scaling amounts and keeps business exceptions apart"
     return f
 end function

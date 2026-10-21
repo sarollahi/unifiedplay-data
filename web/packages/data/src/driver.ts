@@ -1,5 +1,5 @@
 import type { DataClient } from './client.js'
-import type { VideoMonitor } from './html5.js'
+import { takePageLoad, type VideoMonitor } from './html5.js'
 import { ViewTracker, type PageInfo, type PlayerInfo, type RequestInfo, type VideoInfo } from './tracker.js'
 
 /**
@@ -47,6 +47,9 @@ export function playerDriver(client: DataClient, playerInfo: PlayerInfo, page: P
   let early: Array<[RequestKind, RequestInfo]> = []
   let drmType = ''
   let mode = 'standard'
+  // Web players (JW Player): the page's load time goes with the first view on the page.
+  const pageLoad = page ? takePageLoad() : null
+  let captionsOn = false
   const send = () => void client.flush()
 
   const current = (): ViewTracker | null => {
@@ -55,6 +58,8 @@ export function playerDriver(client: DataClient, playerInfo: PlayerInfo, page: P
     view = new ViewTracker(video, player)
     client.add(view)
     if (page) view.setPage(page)
+    if (pageLoad !== null) view.pageLoad(pageLoad)
+    if (captionsOn) view.captions(true)
     if (size) view.playerSize(...size)
     if (rendition) view.rendition(...rendition)
     if (sourceAt !== null && readyAt !== null) view.playerStartup(readyAt - sourceAt)
@@ -112,13 +117,19 @@ export function playerDriver(client: DataClient, playerInfo: PlayerInfo, page: P
       rendition = [kbps, width, height]
       view?.rendition(kbps, width, height)
     },
-    error(code, message, fatal) {
+    error(code, message, fatal, businessException = false) {
       // A source that fails while someone wants it played is a failed view; a preloaded one is nobody's.
       const failing = fatal ? (view && !view.ended ? view : null) : view
       if (!failing || failing.ended) return
-      failing.failed(code, message, fatal)
+      failing.failed(code, message, fatal, businessException)
       if (fatal) send()
     },
+    captions(on) {
+      captionsOn = captionsOn || on
+      view?.captions(on)
+    },
+    adRequest() { current()?.adRequest() },
+    adResponse() { view?.adResponse() },
     requestCompleted: request('requestCompleted'),
     requestFailed: request('requestFailed'),
     requestCanceled: request('requestCanceled'),

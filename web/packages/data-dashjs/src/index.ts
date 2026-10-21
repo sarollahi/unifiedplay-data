@@ -24,6 +24,9 @@ interface DashLike {
   /** dash.js 4. */
   getBitrateInfoListFor?(type: 'video'): BitrateInfo[]
   addResponseInterceptor?(interceptor: (response: DashResponse) => Promise<DashResponse>): void
+  /** Seconds behind the live edge (live streams). */
+  getCurrentLiveLatency?(): number
+  isDynamic?(): boolean
   removeResponseInterceptor?(interceptor: (response: DashResponse) => Promise<DashResponse>): void
 }
 
@@ -49,6 +52,8 @@ function requestType(request: DashRequest | undefined): RequestType | null {
 export function trackDashJs(monitor: VideoMonitor, dash: DashLike): () => void {
   const rendered = (event: DashEvent) => {
     if (event.mediaType !== 'video') return
+    const latency = dash.isDynamic?.() ? dash.getCurrentLiveLatency?.() : undefined
+    if (latency && latency > 0) monitor.liveLatency(latency * 1000)
     // dash.js 5 sends the representation; 4 sends an index into the bitrate list.
     const next = event.newRepresentation
     if (next) { monitor.rendition(next.bandwidth ? next.bandwidth / 1000 : null, next.width ?? null, next.height ?? null); return }

@@ -14,6 +14,12 @@ class VideoInfo {
     this.cdn,
     this.drmType,
     this.viewSessionId,
+    this.contentType,
+    this.languageCode,
+    this.variantName,
+    this.encodingVariant,
+    this.experimentName,
+    this.subPropertyId,
     this.custom = const {},
   });
 
@@ -35,7 +41,25 @@ class VideoInfo {
   /// Your own id for this view, to join it with CDN logs: give your CMCD session id the same value.
   final String? viewSessionId;
 
-  /// Up to five of your own dimensions (1..5); the Console breaks views down by them.
+  /// episode, movie, trailer, clip, live…
+  final String? contentType;
+
+  /// The audio language, e.g. en, sv.
+  final String? languageCode;
+
+  /// Which variant of the video (a cut, a dub).
+  final String? variantName;
+
+  /// Which encoding ladder or settings, for comparing encodings.
+  final String? encodingVariant;
+
+  /// An A/B test this view is in.
+  final String? experimentName;
+
+  /// A part of your service (a site, a customer, a channel).
+  final String? subPropertyId;
+
+  /// Up to ten of your own dimensions (1..10); the Console breaks views down by them.
   final Map<int, String> custom;
 }
 
@@ -144,6 +168,9 @@ class ViewTracker {
   bool _fullscreen = false;
   bool _pip = false;
   String _mode = 'standard';
+  bool _captions = false;
+  // Pre-roll (spec: Startup): when it was asked to play, the open ad request, the last ad response.
+  double? _prerollAt, _adRequestAt, _adResponseAt;
   bool ended = false;
 
   double? playerStartupMs;
@@ -159,6 +186,9 @@ class ViewTracker {
   int _requestFailedManifest = 0, _requestFailedMedia = 0, _requestFailedEncryption = 0;
   int _requestMediaCompleted = 0, _requestMediaBytes = 0, _requestMediaTtfbCount = 0;
   double _requestMediaMs = 0, _requestMediaTtfbMs = 0, _requestMediaMaxTtfbMs = 0;
+  double? contentStartupMs, adStartupMs, _prerollRequestMs, _prerollLoadMs;
+  int _prerollRequests = 0;
+  double _upscalePctMs = 0, _downscalePctMs = 0, _maxDownscalePct = 0;
 
   void playerStartup(double ms) {
     if (playerStartupMs == null && ms.isFinite) playerStartupMs = max(0, ms);
@@ -179,7 +209,10 @@ class ViewTracker {
     if (ended || _state == _State.ad) return;
     if (!_firstFrame) {
       _firstFrame = true;
-      videoStartupMs = _now() - (_playRequestedAt ?? _t0) - _startupAdMs;
+      final since = _now() - (_playRequestedAt ?? _t0);
+      // Video startup ends at the first frame of a pre-roll, if one came first; content startup leaves ads out.
+      videoStartupMs ??= since;
+      contentStartupMs = since - _startupAdMs;
     }
     if (_state == _State.rebuffering) _event('rebufferend');
     if (_state != _State.playing) _event('playing');
@@ -247,12 +280,45 @@ class ViewTracker {
     if (ms.isFinite) _liveLatencyMs = max(0, ms);
   }
 
-  void failed(String code, String message, {bool fatal = true}) {
+  /// An error. fatal: it stopped playback. businessException: your own rule stopped it (geo-block,
+  /// paywall, too many streams): no playback failure.
+  void failed(String code, String message, {bool fatal = true, bool businessException = false}) {
     if (ended) return;
-    _event('error', {'code': code, 'message': message, 'fatal': fatal});
+    _event('error', {'code': code, 'message': message, 'fatal': fatal, if (businessException) 'business_exception': true});
     if (!fatal) return;
-    _error = {'code': code, 'message': message, 'fatal': fatal};
+    _error = {'code': code, 'message': message, 'fatal': fatal, 'business_exception': businessException};
     end();
+  }
+
+  /// Captions shown at some point of the view.
+  void captions(bool on) {
+    if (!on || _captions) return;
+    _captions = true;
+    _event('captions', {'on': true});
+  }
+
+  /// An ad request went out (VAST/VMAP). Before the first pre-roll plays, its time is pre-roll request time.
+  void adRequest() {
+    if (ended) return;
+    if (!_firstFrame && adStartupMs == null) {
+      _prerollRequests += 1;
+      _adRequestAt ??= _now();
+    }
+    _event('adrequest');
+  }
+
+  /// The ad response came back and was read.
+  void adResponse() {
+    if (ended) return;
+    final now = _now();
+    final requested = _adRequestAt, played = _playRequestedAt;
+    if (requested != null && played != null && adStartupMs == null) {
+      // Only time after playback was asked for counts.
+      _prerollRequestMs = (_prerollRequestMs ?? 0) + now - max(requested, played);
+    }
+    _adRequestAt = null;
+    _adResponseAt = now;
+    _event('adresponse');
   }
 
   void completed() {
@@ -283,13 +349,22 @@ class ViewTracker {
   void adStart() {
     if (ended) return;
     if (_state != _State.ad) adBreakStart();
+    if (!_firstFrame) _prerollAt ??= _now();
     _adCount += 1;
     _event('adplay');
   }
 
   void adPlaying() {
     if (_state != _State.ad || _adPlayingSince != null) return;
-    _adPlayingSince = _now();
+    final now = _now();
+    _adPlayingSince = now;
+    if (!_firstFrame && adStartupMs == null) {
+      final asked = _prerollAt ?? _adBreakAt;
+      adStartupMs = now - asked;
+      // Loading the ad: from the last ad response (or the ad's start), never before playback was asked for.
+      _prerollLoadMs = now - max(_adResponseAt ?? asked, _playRequestedAt ?? double.negativeInfinity);
+      videoStartupMs = now - (_playRequestedAt ?? _t0);
+    }
     _event('adplaying');
   }
 
@@ -405,12 +480,16 @@ class ViewTracker {
         'id': video.id, 'title': video.title, 'series_id': video.seriesId, 'series_title': video.seriesTitle,
         'duration_ms': video.durationMs, 'stream_type': video.streamType, 'source_type': video.sourceType,
         'source_host': video.sourceHost, 'cdn': cdn.isEmpty ? null : cdn, 'drm_type': drmType.isEmpty ? null : drmType,
+        'content_type': video.contentType, 'language_code': video.languageCode,
+        'variant_name': video.variantName, 'encoding_variant': video.encodingVariant,
       },
       'player': {
         'name': player.name, 'version': player.version, 'autoplay': player.autoplay,
-        'width': _playerWidth, 'height': _playerHeight, 'fullscreen': _fullscreen, 'pip': _pip,
+        'width': _playerWidth, 'height': _playerHeight, 'fullscreen': _fullscreen, 'pip': _pip, 'captions': _captions,
       },
       if (video.viewSessionId != null) 'view_session_id': video.viewSessionId,
+      if (video.experimentName != null) 'experiment_name': video.experimentName,
+      if (video.subPropertyId != null) 'sub_property_id': video.subPropertyId,
       'metrics': {
         'player_startup_ms': whole(playerStartupMs),
         'video_startup_ms': whole(videoStartupMs),
@@ -447,6 +526,14 @@ class ViewTracker {
         'request_media_ttfb_ms': _requestMediaTtfbMs.round(),
         'request_media_ttfb_count': _requestMediaTtfbCount,
         'request_media_max_ttfb_ms': _requestMediaMaxTtfbMs.round(),
+        'content_startup_ms': whole(contentStartupMs),
+        'ad_startup_ms': whole(adStartupMs),
+        'preroll_request_ms': whole(_prerollRequestMs),
+        'preroll_load_ms': whole(_prerollLoadMs),
+        'preroll_requests': _prerollRequests,
+        'upscale_pct_ms': _upscalePctMs.round(),
+        'downscale_pct_ms': _downscalePctMs.round(),
+        'max_downscale_pct': _maxDownscalePct,
       },
       'custom': {for (final e in video.custom.entries) if (e.value.isNotEmpty) '${e.key}': e.value},
       'error': _error,
@@ -492,12 +579,18 @@ class ViewTracker {
     }
     final vw = _videoWidth, vh = _videoHeight, pw = _playerWidth, ph = _playerHeight;
     if (vw != null && vh != null && pw != null && ph != null && vw > 0 && vh > 0) {
+      // How much the dimension that fills the player first is stretched (320 → 640: 100 %) or shrunk.
       final scale = min(pw / vw, ph / vh);
       if (scale > 1) {
+        final pct = ((scale - 1) * 1000).round() / 10;
         _upscaleMs += ms;
-        _maxUpscalePct = max(_maxUpscalePct, ((scale - 1) * 1000).round() / 10);
+        _upscalePctMs += pct * ms;
+        _maxUpscalePct = max(_maxUpscalePct, pct);
       } else if (scale < 1) {
+        final pct = ((1 / scale - 1) * 1000).round() / 10;
         _downscaleMs += ms;
+        _downscalePctMs += pct * ms;
+        _maxDownscalePct = max(_maxDownscalePct, pct);
       }
     }
   }
