@@ -208,10 +208,20 @@ own ids before new content and `adEvent` from your ad code (see the component's 
 
 ## Your own ad player
 
-Every monitor takes ad events, so any ad player can report them: `adBreakStart()` when the video
+Every monitor takes ad events, so any ad player can report them: `adRequest()` when an ad
+request (VAST/VMAP) goes out and `adResponse()` when it is read, `adBreakStart()` when the video
 gives way to ads, `adStart()` for each ad asked to play, `adPlaying()`, `adPause()`, `adEnd()`,
 `adError(code, message)`, and `adBreakEnd()` when the video takes over again. Time in an ad break
-never counts as video time, and a pre-roll does not count towards video startup.
+never counts as video time. Video startup ends at the first frame of a pre-roll (or the video);
+content startup leaves the pre-roll out, and the Console also shows the pre-roll's startup, its
+request and load time, and the requests before it.
+
+## Errors your own rules cause
+
+A geo-block, a paywall or too many streams stop playback on purpose: report them as business
+exceptions and they do not count as playback failures (the Console counts them apart):
+`monitor.error(code, message, true, true)` on the web, `monitor.businessException(code, message)`
+on Android, iOS and Flutter.
 
 ## Requests, CDN and CMCD
 
@@ -231,17 +241,21 @@ iOS, web, Flutter; Roku `config.beaconDomain`).
 
 ## Your own dimensions
 
-`VideoInfo` takes up to five custom values, and the Console breaks views down by them:
+`VideoInfo` takes your experiment, a sub-property, the content type, language, variant and
+encoding variant, and up to ten custom values; the Console breaks views down by all of them:
 
 ```kotlin
-VideoInfo(id = "ep-1", custom = mapOf(1 to "experiment-b", 2 to "sports"))   // Android
+VideoInfo(id = "ep-1", experimentName = "new-ladder", contentType = "episode", custom = mapOf(1 to "sports"))   // Android
 ```
 ```swift
-VideoInfo(id: "ep-1", custom: [1: "experiment-b", 2: "sports"])              // iOS
+VideoInfo(id: "ep-1", contentType: "episode", experimentName: "new-ladder", custom: [1: "sports"])              // iOS
 ```
 ```ts
-{ id: 'ep-1', custom: { 1: 'experiment-b', 2: 'sports' } }                   // web
+{ id: 'ep-1', experimentName: 'new-ladder', contentType: 'episode', custom: { 1: 'sports' } }                  // web
 ```
+
+Captions are seen by themselves on the web (text tracks), Media3, AVPlayer and Roku; elsewhere
+call `monitor.captions(true)`.
 
 ## How a view works
 

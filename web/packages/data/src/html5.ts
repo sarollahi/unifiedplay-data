@@ -8,8 +8,15 @@ export interface VideoMonitor {
   setPlayer(player: PlayerInfo): void
   /** The rendition playing now, from the streaming library (see @unifiedplay/data-hlsjs, -shaka…). */
   rendition(kbps: number | null, width: number | null, height: number | null): void
-  /** A playback error the streaming library reported. */
-  error(code: string, message: string, fatal: boolean): void
+  /** A playback error. businessException: your own rule stopped playback (geo-block, paywall…), no failure. */
+  error(code: string, message: string, fatal: boolean, businessException?: boolean): void
+  /** Live streams: the distance to the live edge (the -hlsjs, -dashjs, -shaka packages report it). */
+  liveLatency(ms: number): void
+  /** Captions on or off (HTML5 text tracks are seen by themselves). */
+  captions(on: boolean): void
+  /** An ad request went out / its response was read: pre-roll request time (spec: Startup). */
+  adRequest(): void
+  adResponse(): void
   /** Network requests for the content, from the streaming library (the -hlsjs, -shaka… packages call these). */
   requestCompleted(request: RequestInfo): void
   requestFailed(request: RequestInfo): void
@@ -60,6 +67,14 @@ export interface MonitorOptions {
 const MAX_EARLY_REQUESTS = 50
 type EarlyRequest = ['requestCompleted' | 'requestFailed' | 'requestCanceled', RequestInfo]
 
+// Page load time goes with the first view on the page only.
+let pageLoadTaken = false
+export function takePageLoad(): number | null {
+  if (pageLoadTaken || typeof performance === 'undefined') return null
+  pageLoadTaken = true
+  return performance.now() // since the page was asked for, to the player's start
+}
+
 function pageInfo(): PageInfo | null {
   if (typeof location === 'undefined') return null
   let framed = false
@@ -90,6 +105,7 @@ export function monitorVideo(
   let early: EarlyRequest[] = []
   let drmType = ''
   let mode = 'standard'
+  const pageLoad = takePageLoad()
   // Player startup: from the source to the metadata, measured even before anyone presses play.
   let sourceAt: number | null = performance.now()
   let readyAt: number | null = null
@@ -105,6 +121,8 @@ export function monitorVideo(
       size()
       const page = pageInfo()
       if (page) view.setPage(page)
+      if (pageLoad !== null) view.pageLoad(pageLoad)
+      if (captionsShowing()) view.captions(true)
       if (drmType) view.setDrmType(drmType)
       if (mode !== 'standard') view.playbackMode(mode)
       for (const [kind, request] of early) view[kind](request)
@@ -177,6 +195,10 @@ export function monitorVideo(
   const elementEvents = ['enterpictureinpicture', 'leavepictureinpicture', 'webkitpresentationmodechanged']
   if (typeof document !== 'undefined') for (const name of docEvents) document.addEventListener(name, modeNow)
   for (const name of elementEvents) element.addEventListener(name, modeNow)
+  const tracks = (element as MediaLike & { textTracks?: TextTrackList }).textTracks
+  const captionsShowing = () => Array.from(tracks ?? []).some(track => track.mode === 'showing' && (track.kind === 'captions' || track.kind === 'subtitles'))
+  const captionsChanged = () => { if (captionsShowing()) view?.captions(true) }
+  tracks?.addEventListener?.('change', captionsChanged)
   const request = (kind: EarlyRequest[0]) => (info: RequestInfo) => {
     if (view && !view.ended) view[kind](info)
     else if (early.length < MAX_EARLY_REQUESTS) early.push([kind, info])
@@ -192,11 +214,15 @@ export function monitorVideo(
       rendition = [kbps, width, height]
       view?.rendition(kbps, width, height)
     },
-    error(code, message, fatal) {
+    error(code, message, fatal, businessException = false) {
       if (!view || view.ended) return
-      view.failed(code, message, fatal)
+      view.failed(code, message, fatal, businessException)
       if (fatal) send()
     },
+    liveLatency(ms) { view?.liveLatency(ms) },
+    captions(on) { view?.captions(on) },
+    adRequest() { current().adRequest() },
+    adResponse() { view?.adResponse() },
     requestCompleted: request('requestCompleted'),
     requestFailed: request('requestFailed'),
     requestCanceled: request('requestCanceled'),
@@ -220,6 +246,7 @@ export function monitorVideo(
       for (const [name, handler] of handlers) element.removeEventListener(name, handler)
       if (typeof document !== 'undefined') for (const name of docEvents) document.removeEventListener(name, modeNow)
       for (const name of elementEvents) element.removeEventListener(name, modeNow)
+      tracks?.removeEventListener?.('change', captionsChanged)
       resizeObserver?.disconnect()
       quality()
       if (view && !view.ended) view.end()

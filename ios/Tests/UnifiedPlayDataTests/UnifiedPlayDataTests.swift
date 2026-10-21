@@ -27,6 +27,49 @@ final class ViewTrackerTests: XCTestCase {
         XCTAssertEqual(types(snapshot), ["viewstart", "play", "playing", "rebufferstart", "rebufferend", "playing", "seeking", "seeked", "playing", "pause"])
     }
 
+    func testTimesPreRollRequestsLoadingAndStartupAfterThePlayRequest() {
+        let view = ViewTracker(video: VideoInfo(id: "v", contentType: "episode", experimentName: "ladder-b", custom: [10: "tenth"]),
+                               player: PlayerInfo(name: "test")) { [unowned self] in time }
+        view.adRequest()
+        time += 300; view.play()
+        time += 200; view.adResponse()
+        time += 100; view.adRequest(); time += 150; view.adResponse()
+        time += 50; view.adBreakStart(); view.adStart()
+        time += 400; view.adPlaying()
+        time += 10_000; view.adEnd(); view.adBreakEnd()
+        time += 700; view.playing()
+        let snapshot = view.snapshot()
+        let m = metrics(snapshot)
+        XCTAssertEqual(m["preroll_requests"] as? Int, 2)
+        XCTAssertEqual(m["preroll_request_ms"] as? Int, 350)
+        XCTAssertEqual(m["ad_startup_ms"] as? Int, 400)
+        XCTAssertEqual(m["preroll_load_ms"] as? Int, 450)
+        XCTAssertEqual(m["video_startup_ms"] as? Int, 900)
+        XCTAssertEqual(m["content_startup_ms"] as? Int, 1200)
+        XCTAssertEqual(snapshot["experiment_name"] as? String, "ladder-b")
+        XCTAssertEqual((snapshot["video"] as! [String: Any])["content_type"] as? String, "episode")
+        XCTAssertEqual(snapshot["custom"] as? [String: String], ["10": "tenth"])
+    }
+
+    func testWeighsScalingAmountsByTimeAndKeepsBusinessExceptionsApart() {
+        let view = tracker()
+        view.playerSize(width: 1280, height: 720)
+        view.rendition(kbps: 800, width: 640, height: 360)
+        view.play(); view.playing()
+        time += 1000
+        view.rendition(kbps: 4000, width: 2560, height: 1440)
+        time += 3000
+        view.captions(true)
+        view.failed(code: "geo", message: "Not in your country", fatal: true, businessException: true)
+        let snapshot = view.snapshot()
+        let m = metrics(snapshot)
+        XCTAssertEqual(m["upscale_pct_ms"] as? Int, 100_000)
+        XCTAssertEqual(m["downscale_pct_ms"] as? Int, 300_000)
+        XCTAssertEqual(m["max_downscale_pct"] as? Double, 100)
+        XCTAssertEqual((snapshot["error"] as! [String: Any])["business_exception"] as? Bool, true)
+        XCTAssertEqual((snapshot["player"] as! [String: Any])["captions"] as? Bool, true)
+    }
+
     func testAddsUpRequestsCountsFailuresByTypeAndNamesTheCDN() {
         let view = ViewTracker(video: VideoInfo(id: "ep_1", viewSessionID: "cmcd-1"), player: PlayerInfo(name: "test")) { [unowned self] in time }
         view.requestCompleted(RequestInfo(type: "manifest", start: 0, responseStart: 50, responseEnd: 80, bytes: 2_000, headers: ["X-CDN": "fastly"]))
@@ -102,7 +145,8 @@ final class ViewTrackerTests: XCTestCase {
         time += 5_000; view.adEnd(); view.adBreakEnd(); time += 100; view.playing(); time += 1_000
         let snapshot = view.snapshot()
         let m = metrics(snapshot)
-        XCTAssertEqual(m["video_startup_ms"] as? Int, 500)
+        XCTAssertEqual(m["video_startup_ms"] as? Int, 0) // ends at the pre-roll's first frame
+        XCTAssertEqual(m["content_startup_ms"] as? Int, 500)
         XCTAssertEqual(m["ad_break_count"] as? Int, 2)
         XCTAssertEqual(m["ad_count"] as? Int, 3)
         XCTAssertEqual(m["ad_error_count"] as? Int, 1)

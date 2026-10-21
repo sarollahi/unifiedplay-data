@@ -82,10 +82,12 @@ loses nothing but its events. `events` holds only the events since the previous 
   "video": {
     "id": "ep_123_ab", "title": "Episode 1", "series_id": "s_9_ab", "series_title": "My series",
     "duration_ms": 92000, "stream_type": "on-demand", "source_type": "hls",
-    "source_host": "media.example.com", "cdn": "cloudflare", "drm_type": "widevine"
+    "source_host": "media.example.com", "cdn": "cloudflare", "drm_type": "widevine",
+    "content_type": "episode", "language_code": "en", "variant_name": "director's cut", "encoding_variant": "ladder-b"
   },
   "player": {"name": "media3", "version": "1.11.0", "width": 1080, "height": 1920, "autoplay": true,
-             "fullscreen": false, "pip": false},
+             "fullscreen": false, "pip": false, "captions": false},
+  "experiment_name": "new-ladder", "sub_property_id": "site-b",
   "page": {"type": "watchpage", "url": "https://www.example.com/watch/ep_123_ab"},
   "view_session_id": "6e1d…",
   "metrics": {
@@ -123,7 +125,16 @@ loses nothing but its events. `events` holds only the events since the previous 
     "request_media_ms": 16600,
     "request_media_ttfb_ms": 4680,
     "request_media_ttfb_count": 52,
-    "request_media_max_ttfb_ms": 310
+    "request_media_max_ttfb_ms": 310,
+    "content_startup_ms": 840,
+    "ad_startup_ms": null,
+    "preroll_request_ms": null,
+    "preroll_load_ms": null,
+    "preroll_requests": 0,
+    "page_load_ms": null,
+    "upscale_pct_ms": 0,
+    "downscale_pct_ms": 0,
+    "max_downscale_pct": 0
   },
   "custom": {"1": "experiment-b", "2": "sports"},
   "error": null,
@@ -131,14 +142,22 @@ loses nothing but its events. `events` holds only the events since the previous 
 }
 ```
 
-`error`, when the view failed: `{"code": "2004", "message": "Source error", "fatal": true}`.
+`error`, when the view failed: `{"code": "2004", "message": "Source error", "fatal": true,
+"business_exception": false}`. A fatal error the app marks `business_exception` (its own rule
+stopped playback: a geo-block, a paywall, too many streams) ends the view without failing it.
 
 ### Metrics
 
 | Field | Meaning |
 |---|---|
 | `player_startup_ms` | player created (or given its first source) → ready to play. Once per view, `null` until known. |
-| `video_startup_ms` | play asked for → first frame shown. `null` until the first frame. |
+| `video_startup_ms` | play asked for → first frame shown, of the content or of a pre-roll ad, whichever comes first. `null` until then. |
+| `content_startup_ms` | play asked for → the content's first frame, less the time of pre-roll ad breaks. |
+| `ad_startup_ms` | the first pre-roll asked to play → its first frame. |
+| `preroll_request_ms` | time spent on ad requests (`adRequest` → `adResponse`) after play was asked for and before the first pre-roll played. |
+| `preroll_load_ms` | the last ad response (or the pre-roll's start) → the pre-roll's first frame, after play was asked for. |
+| `preroll_requests` | ad requests before the first pre-roll played. |
+| `page_load_ms` | web, the first view on a page: the page's request → the player's start. |
 | `watch_ms` | time from play asked for until now/end, minus paused time. Includes startup and rebuffering. |
 | `playing_ms` | time the playhead actually moved. |
 | `rebuffer_count`, `rebuffer_ms` | stalls after the first frame (not seeks, not startup). |
@@ -149,7 +168,8 @@ loses nothing but its events. `events` holds only the events since the previous 
 | `rendition_changes` | quality switches after the first frame. |
 | `video_width/height` | size of the rendition playing now. |
 | `upscale_ms`, `downscale_ms` | playing time while the rendition was smaller / larger than the player on screen. |
-| `max_upscale_pct` | largest `(player size / rendition size − 1) × 100` seen. |
+| `upscale_pct_ms`, `downscale_pct_ms` | the upscale (downscale) amount times the milliseconds it lasted, added up: the amount is how much the dimension that fills the player first is stretched, `(player / rendition − 1) × 100` (320 → 640: 100), or shrunk, `(rendition / player − 1) × 100`. |
+| `max_upscale_pct`, `max_downscale_pct` | the largest of those amounts. |
 | `dropped_frames` | frames the player dropped. |
 | `live_latency_ms` | live streams: latest distance to the live edge. |
 | `ad_break_count` | ad breaks (pre-, mid-, post-roll) that started. |
@@ -171,6 +191,11 @@ the totals above; a failed or aborted one is also an event. The `X-CDN` response
 the CDN sets one, names the view's CDN (`video.cdn`, unless the app set it): the latest value
 wins, and each change is a `cdnchange` event.
 
+**More view fields.** `video.content_type` (episode, movie, trailer…), `video.language_code`,
+`video.variant_name`, `video.encoding_variant`, `experiment_name` (an A/B test) and
+`sub_property_id` (a part of the service) are the app's, for breakdowns. `player.captions` says
+whether captions were shown at some point. `custom` holds up to ten values, `"1"` … `"10"`.
+
 **View fields.** `video.cdn` and `video.drm_type` (`widevine`, `playready`, `fairplay`,
 `clearkey`) come from the player where it tells, else from the app. `player.fullscreen` and
 `player.pip` say whether the view was ever fullscreen or picture-in-picture; each change of
@@ -181,8 +206,8 @@ player's CMCD (`sid`) the same value. The SDKs leave it out when the app sets no
 Time inside an ad break is not content time: it is neither watch, playing nor rebuffering
 time, and a pre-roll does not count towards video startup time.
 
-`custom` holds up to five of the customer's own dimensions (`"1"` … `"5"`, 255 characters
-each), e.g. an experiment name or a page type. The Console breaks views down by them.
+`custom` holds up to ten of the customer's own dimensions (`"1"` … `"10"`, 255 characters
+each), e.g. a page type or a customer segment. The Console breaks views down by them.
 `device.app_id` is the app's package / bundle id, or the site's host on the web.
 
 ### Events
@@ -191,10 +216,10 @@ each), e.g. an experiment name or a page type. The Console breaks views down by 
 `requestfailed` (`data: {"type", "hostname", "error", "code", "text"}`), `requestcanceled`
 (`data: {"type", "hostname"}`), `cdnchange` (`data: {"cdn"}`), `playbackmodechange`
 (`data: {"mode"}`),
-`seeking`, `seeked`, `rebufferstart`, `rebufferend`, `rendition` (`data: {"kbps", "width",
+`seeking`, `seeked`, `rebufferstart`, `rebufferend`, `captions` (`data: {"on"}`), `rendition` (`data: {"kbps", "width",
 "height"}`), `error` (`data: {"code", "message", "fatal"}`), `ended`, `viewend`, and for ads
-`adbreakstart`, `adplay`, `adplaying`, `adpause`, `adended`, `aderror` (`data: {"code",
-"message"}`), `adbreakend`.
+`adrequest`, `adresponse`, `adbreakstart`, `adplay`, `adplaying`, `adpause`, `adended`,
+`aderror` (`data: {"code", "message"}`), `adbreakend`.
 The backend keeps the first 500 events of a view.
 
 ## When to send
@@ -208,17 +233,30 @@ or the app/page closed. A view with no beacon for 60 s is treated as ended by th
 
 ## What the backend works out
 
-Per view, stored on the view row:
+Per view:
 
-- `exited_before_start`: ended, no first frame, no fatal error
-- `startup_failed`: fatal error before the first frame
-- `failed`: fatal error at any time
-- scores 0–100:
-  - playback success: 100, or 50 when exited before start, or 0 when failed
-  - startup: 100 at ≤ 1 s, falling straight to 0 at 10 s; failed or exited views get none
-  - smoothness: `100 × (1 − 10 × rebuffer_ms / watch_ms)`, at least 0
-  - quality: `100 × (1 − upscale_ms / playing_ms)`, at least 0
-  - overall: mean of the scores the view has
+- `exited_before_start` (EBVS): ended, no first frame (no `video_startup_ms`), no failure, no
+  business exception
+- `startup_failed`: a fatal error (not a business exception) before the first frame
+- `failed`: a fatal error (not a business exception) at any time
+- `business_exception`: a fatal error the app marked as its own rule
+- scores 0–100 (a view that never started gets only a playback success score):
+  - playback success: 100; 50 when it exited before start (none when that took under 1 s); 0
+    when it failed; none for a business exception
+  - startup: `8 / (8 + video startup seconds) × 100` (400 ms → 95, 2 s → 80, 8 s → 50)
+  - smoothness: the mean of `100 / √(1 + (rebuffer_count / 2)²)` and
+    `100 × e^(−10 × rebuffer_ms / watch_ms)`
+  - quality: `100 × e^(−0.33 × (0.15 × max upscale + 0.85 × average upscale))`, the upscale
+    amounts as fractions (50 % → 0.5), average = `upscale_pct_ms / playing_ms`
+  - overall: playback success / 100 × the mean of three tradeoffs, Tradeoff(smoothness, quality),
+    Tradeoff(smoothness, startup), Tradeoff(startup, quality); Tradeoff(a, b) is the weighted
+    harmonic mean `1 / (w / a + (1 − w) / b)` (0 when either is 0, the other when one is
+    missing) with w = 0.6, 0.55 and 0.6, so the worse score weighs most and smoothness counts
+    more than startup, startup more than quality. A view with only a success score has that.
+
+A view counts in the metrics once it is over (ended, failed, or no beacon for 60 s). Engagement
+metrics (views, viewers, watch and playing time, ads) take the views that started in the period;
+the quality metrics and scores take the views that ended in it.
 
 Across views (Console):
 
@@ -227,15 +265,21 @@ Across views (Console):
 | Views | count of views |
 | Unique viewers | distinct `device_id` |
 | Playback failure % | failed views / views |
-| Startup failure % | startup-failed views / views |
+| Video startup failure % | startup-failed views / views |
+| Video playback failure % | views that failed after their first frame / views |
+| Business exceptions %, startup business exceptions % | views with a business exception (before the first frame) / views |
 | Exits before start % | exited-before-start views / views |
-| Video startup time | median and 95th percentile of `video_startup_ms` |
-| Player startup time | median of `player_startup_ms` |
+| Video startup time, content startup time, ad pre-roll startup time | median and 95th percentile |
+| Pre-roll request time, pre-roll load time, player startup, page load | median |
+| Requests for the first pre-roll | mean of `preroll_requests` over views with a pre-roll |
+| Aggregate startup time | median of page load + player startup + video startup (first view on a page) |
 | Rebuffer % | Σ rebuffer_ms / Σ watch_ms |
 | Rebuffer frequency | Σ rebuffer_count / (Σ watch_ms in minutes) |
-| Rebuffer duration | Σ rebuffer_ms / views that rebuffered |
+| Rebuffer duration, rebuffer count | Σ rebuffer_ms / views, Σ rebuffer_count / views |
 | Seek latency | Σ seek_ms / Σ seek_count |
-| Upscale % / Downscale % | Σ upscale_ms / Σ playing_ms (same for downscale) |
+| Upscale % / Downscale % | Σ upscale_pct_ms / Σ playing_ms (the amount, weighted by time; same for downscale) |
+| Max upscale % / max downscale % | mean of the views' largest amounts |
+| Live latency | mean over live views, leaving out viewers more than 5 minutes behind |
 | Average bitrate | Σ (avg_bitrate × playing_ms) / Σ playing_ms |
 | Watch time / Playing time | Σ watch_ms / Σ playing_ms |
 | Live viewers | views with a beacon in the last 30 s and not ended |
@@ -251,9 +295,10 @@ Across views (Console):
 
 Breakdowns group these by: environment, platform, os, os version, device model, manufacturer,
 browser, browser version, app or site, app version, player, player version, SDK version,
-autoplay, fullscreen, picture-in-picture, DRM type, page type, page URL, continent, country,
-region, ASN, connection, video, series, stream type, source type, source hostname, CDN, error
-code, viewer, custom 1–5.
+autoplay, fullscreen, picture-in-picture, captions, DRM type, page type, page URL, continent,
+country, region, ASN, connection, video, series, content type, language, variant, encoding
+variant, experiment, sub-property, stream type, source type, source hostname, CDN, error code,
+viewer, custom 1–10.
 
 Continent, country, region and ASN come from Cloudflare's request headers when the request
 passed through Cloudflare (`CF-IPContinent`, `CF-IPCountry`, `CF-Region`, and `X-Client-ASN`,

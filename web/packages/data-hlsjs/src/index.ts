@@ -13,6 +13,8 @@ type HlsData = {
 }
 interface HlsLike {
   levels: HlsLevel[]
+  /** Seconds behind the live edge (live streams). */
+  latency?: number
   on(event: string, listener: (event: string, data: HlsData) => void): void
   off(event: string, listener: (event: string, data: HlsData) => void): void
 }
@@ -60,6 +62,7 @@ export function trackHlsJs(monitor: VideoMonitor, hls: HlsLike): () => void {
     hlsAudioTrackLoaded: (_, data) => monitor.requestCompleted(loaded('manifest', data.context?.url, data.stats, data.networkDetails)),
     hlsSubtitleTrackLoaded: (_, data) => monitor.requestCompleted(loaded('manifest', data.context?.url, data.stats, data.networkDetails)),
     hlsFragLoaded: (_, data) => monitor.requestCompleted(loaded(fragmentType(data.frag), data.frag?.url, data.part?.stats ?? data.frag?.stats, data.networkDetails)),
+    hlsFragChanged: () => { if (typeof hls.latency === 'number' && hls.latency > 0) monitor.liveLatency(hls.latency * 1000) },
     hlsFragLoadEmergencyAborted: (_, data) => monitor.requestCanceled({ type: fragmentType(data.frag), hostname: hostnameOf(data.frag?.url) }),
     hlsKeyLoaded: (_, data) => {
       const key = data.keyInfo?.decryptdata ?? data.frag?.decryptdata

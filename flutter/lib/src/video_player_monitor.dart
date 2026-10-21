@@ -31,6 +31,7 @@ class VideoPlayerMonitor {
   Duration _lastPosition = Duration.zero;
   double _lastPositionAt = 0;
   String _mode = 'standard';
+  bool _captionsOn = false;
 
   static double _now() => DateTime.now().microsecondsSinceEpoch / 1000;
 
@@ -51,6 +52,36 @@ class VideoPlayerMonitor {
     _wasPlaying = false;
   }
 
+  /// Captions turned on or off (video_player has no caption state of its own).
+  void captions(bool on) {
+    _captionsOn = _captionsOn || on;
+    _view?.captions(on);
+  }
+
+  /// Your own rule stopped playback (geo-block, paywall, too many streams): the view ends without failing.
+  void businessException(String code, [String message = '']) {
+    _current().failed(code, message, businessException: true);
+    client.flush();
+  }
+
+  /// Your ad code: an ad request went out / its response was read (pre-roll request time), and the ad events.
+  void adRequest() => _current().adRequest();
+  void adResponse() => _view?.adResponse();
+  void adBreakStart() {
+    _current().adBreakStart();
+    client.flush();
+  }
+
+  void adStart() => _current().adStart();
+  void adPlaying() => _view?.adPlaying();
+  void adPause() => _view?.adPause();
+  void adEnd() => _view?.adEnd();
+  void adError(String code, [String message = '']) => _current().adError(code, message);
+  void adBreakEnd() {
+    _view?.adBreakEnd();
+    client.flush();
+  }
+
   /// standard, fullscreen, pip, or your own name.
   void playbackMode(String mode) {
     _mode = mode;
@@ -66,6 +97,7 @@ class VideoPlayerMonitor {
     final source = _sourceAt, ready = _readyAt;
     if (source != null && ready != null) next.playerStartup(ready - source);
     if (_mode != 'standard') next.playbackMode(_mode);
+    if (_captionsOn) next.captions(true);
     final size = controller.value.size;
     if (size.width > 0) next.rendition(null, size.width.round(), size.height.round());
     client.flush();

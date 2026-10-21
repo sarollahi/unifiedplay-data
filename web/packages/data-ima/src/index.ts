@@ -15,7 +15,8 @@ interface ImaLike {
 /**
  * Ads from the IMA HTML5 SDK on a monitored player: ad breaks, ads played, ad watch time and ad
  * errors. Pass the AdsManager (and the AdsLoader, for errors loading the ads). Returns a function
- * that stops listening.
+ * that stops listening. For pre-roll request time, call monitor.adRequest() where you call
+ * adsLoader.requestAds() and monitor.adResponse() in your ADS_MANAGER_LOADED listener.
  */
 export function trackIma(
   monitor: VideoMonitor,

@@ -11,7 +11,7 @@
   Views start when the Video node's control is set to "play"; a new content ends the view. Set
   `info` before new content for your own ids ({ id, title, series_id, custom: { "1": "…" } }),
   and `adEvent` from your ad code ({ type: "adbreakstart" | "adstart" | "adplaying" | "adpause"
-  | "adend" | "aderror" | "adbreakend", code, message }).
+  | "adend" | "aderror" | "adbreakend" | "adrequest" | "adresponse", code, message }).
 -->
 <component name="UnifiedPlayData" extends="Task">
     <interface>

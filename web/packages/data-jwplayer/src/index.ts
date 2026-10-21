@@ -61,6 +61,10 @@ export function monitorJwPlayer(
       const ratio = typeof devicePixelRatio === 'number' ? devicePixelRatio : 1
       if (event.width && event.height) driver.size(Math.round(event.width * ratio), Math.round(event.height * ratio))
     },
+    // JW Player 8's ad request and its loaded VAST response time pre-roll requests (spec: Startup).
+    adRequest: () => driver.adRequest(),
+    adLoaded: () => driver.adResponse(),
+    captionsChanged: event => driver.captions(Number(event.track) > 0),
     adBreakStart: () => driver.adBreakStart(),
     adImpression: () => driver.adStart(),
     adPlay: () => driver.adPlaying(),

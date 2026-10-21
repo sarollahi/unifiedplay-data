@@ -25,7 +25,19 @@ data class VideoInfo(
     val drmType: String? = null,
     /** Your own id for this view, to join it with CDN logs: give your player's CMCD session id the same value. */
     val viewSessionId: String? = null,
-    /** Up to five of your own dimensions (1..5: an experiment, a page type…); the Console breaks views down by them. */
+    /** episode, movie, trailer, clip, live… */
+    val contentType: String? = null,
+    /** The audio language, e.g. en, sv. */
+    val languageCode: String? = null,
+    /** Which variant of the video (a cut, a dub). */
+    val variantName: String? = null,
+    /** Which encoding ladder or settings, for comparing encodings. */
+    val encodingVariant: String? = null,
+    /** An A/B test this view is in. */
+    val experimentName: String? = null,
+    /** A part of your service (a site, a customer, a channel). */
+    val subPropertyId: String? = null,
+    /** Up to ten of your own dimensions (1..10); the Console breaks views down by them. */
     val custom: Map<Int, String> = emptyMap(),
 )
 
@@ -106,6 +118,11 @@ class ViewTracker(
     private var fullscreen = false
     private var pip = false
     private var mode = "standard"
+    private var captionsOn = false
+    // Pre-roll (spec: Startup): when it was asked to play, the open ad request, the last ad response.
+    private var prerollAt: Long? = null
+    private var adRequestAt: Long? = null
+    private var adResponseAt: Long? = null
     var ended = false
         private set
 
@@ -142,6 +159,14 @@ class ViewTracker(
     private var requestMediaTtfbMs = 0L
     private var requestMediaTtfbCount = 0
     private var requestMediaMaxTtfbMs = 0L
+    private var contentStartupMs: Long? = null
+    private var adStartupMs: Long? = null
+    private var prerollRequestMs: Long? = null
+    private var prerollLoadMs: Long? = null
+    private var prerollRequests = 0
+    private var upscalePctMs = 0.0
+    private var downscalePctMs = 0.0
+    private var maxDownscalePct = 0.0
 
     init {
         event("viewstart")
@@ -182,6 +207,39 @@ class ViewTracker(
         if (ended) return
         requestCanceled += 1
         event("requestcanceled", mapOf("type" to request.type, "hostname" to request.hostname))
+    }
+
+    /** Captions shown at some point of the view. */
+    fun captions(on: Boolean) {
+        if (on && !captionsOn) {
+            captionsOn = true
+            event("captions", mapOf("on" to true))
+        }
+    }
+
+    /** An ad request went out (VAST/VMAP). Before the first pre-roll plays, its time is pre-roll request time. */
+    fun adRequest() {
+        if (ended) return
+        if (!firstFrame && adStartupMs == null) {
+            prerollRequests += 1
+            if (adRequestAt == null) adRequestAt = now()
+        }
+        event("adrequest")
+    }
+
+    /** The ad response came back and was read. */
+    fun adResponse() {
+        if (ended) return
+        val current = now()
+        val requested = adRequestAt
+        val played = playRequestedAt
+        if (requested != null && played != null && adStartupMs == null) {
+            // Only time after playback was asked for counts.
+            prerollRequestMs = (prerollRequestMs ?: 0) + current - max(requested, played)
+        }
+        adRequestAt = null
+        adResponseAt = current
+        event("adresponse")
     }
 
     /** standard, fullscreen, pip, or your own name. */
@@ -225,7 +283,10 @@ class ViewTracker(
         if (ended || state == State.AD) return
         if (!firstFrame) {
             firstFrame = true
-            videoStartupMs = now() - (playRequestedAt ?: t0) - startupAdMs
+            val since = now() - (playRequestedAt ?: t0)
+            // Video startup ends at the first frame of a pre-roll, if one came first; content startup leaves ads out.
+            if (videoStartupMs == null) videoStartupMs = since
+            contentStartupMs = since - startupAdMs
         }
         if (state == State.REBUFFERING) event("rebufferend")
         if (state != State.PLAYING) event("playing")
@@ -300,11 +361,16 @@ class ViewTracker(
         liveLatencyMs = max(0, ms)
     }
 
-    fun failed(code: String, message: String, fatal: Boolean = true) {
+    /**
+     * An error. fatal: it stopped playback. businessException: your own rule stopped it (geo-block,
+     * paywall, too many streams): no playback failure.
+     */
+    fun failed(code: String, message: String, fatal: Boolean = true, businessException: Boolean = false) {
         if (ended) return
-        event("error", mapOf("code" to code, "message" to message, "fatal" to fatal))
+        event("error", if (businessException) mapOf("code" to code, "message" to message, "fatal" to fatal, "business_exception" to true)
+            else mapOf("code" to code, "message" to message, "fatal" to fatal))
         if (!fatal) return
-        error = mapOf("code" to code, "message" to message, "fatal" to true)
+        error = mapOf("code" to code, "message" to message, "fatal" to fatal, "business_exception" to businessException)
         end()
     }
 
@@ -342,6 +408,7 @@ class ViewTracker(
     fun adStart() {
         if (ended) return
         if (state != State.AD) adBreakStart()
+        if (!firstFrame && prerollAt == null) prerollAt = now()
         adCount += 1
         event("adplay")
     }
@@ -349,7 +416,15 @@ class ViewTracker(
     /** The ad's frames are moving. */
     fun adPlaying() {
         if (state != State.AD || adPlayingSince != null) return
-        adPlayingSince = now()
+        val current = now()
+        adPlayingSince = current
+        if (!firstFrame && adStartupMs == null) {
+            val asked = prerollAt ?: adBreakAt
+            adStartupMs = current - asked
+            // Loading the ad: from the last ad response (or the ad's start), never before playback was asked for.
+            prerollLoadMs = current - max(adResponseAt ?: asked, playRequestedAt ?: Long.MIN_VALUE)
+            videoStartupMs = current - (playRequestedAt ?: t0)
+        }
         event("adplaying")
     }
 
@@ -403,12 +478,16 @@ class ViewTracker(
                 "duration_ms" to video.durationMs, "stream_type" to video.streamType,
                 "source_type" to video.sourceType, "source_host" to video.sourceHost,
                 "cdn" to cdn.ifEmpty { null }, "drm_type" to drmType.ifEmpty { null },
+                "content_type" to video.contentType, "language_code" to video.languageCode,
+                "variant_name" to video.variantName, "encoding_variant" to video.encodingVariant,
             ),
             "player" to mapOf(
                 "name" to player.name, "version" to player.version, "autoplay" to player.autoplay,
-                "width" to playerWidth, "height" to playerHeight, "fullscreen" to fullscreen, "pip" to pip,
+                "width" to playerWidth, "height" to playerHeight, "fullscreen" to fullscreen, "pip" to pip, "captions" to captionsOn,
             ),
             "view_session_id" to video.viewSessionId,
+            "experiment_name" to video.experimentName,
+            "sub_property_id" to video.subPropertyId,
             "metrics" to mapOf(
                 "player_startup_ms" to playerStartupMs,
                 "video_startup_ms" to videoStartupMs,
@@ -445,6 +524,14 @@ class ViewTracker(
                 "request_media_ttfb_ms" to requestMediaTtfbMs,
                 "request_media_ttfb_count" to requestMediaTtfbCount,
                 "request_media_max_ttfb_ms" to requestMediaMaxTtfbMs,
+                "content_startup_ms" to contentStartupMs,
+                "ad_startup_ms" to adStartupMs,
+                "preroll_request_ms" to prerollRequestMs,
+                "preroll_load_ms" to prerollLoadMs,
+                "preroll_requests" to prerollRequests,
+                "upscale_pct_ms" to upscalePctMs.roundToLong(),
+                "downscale_pct_ms" to downscalePctMs.roundToLong(),
+                "max_downscale_pct" to maxDownscalePct,
             ),
             "custom" to video.custom.filterValues { it.isNotEmpty() }.mapKeys { it.key.toString() },
             "error" to error,
@@ -494,11 +581,17 @@ class ViewTracker(
         val ph = playerHeight ?: return
         if (vw == 0 || vh == 0) return
         val scale = min(pw.toDouble() / vw, ph.toDouble() / vh)
+        // How much the dimension that fills the player first is stretched (320 → 640: 100 %) or shrunk.
         if (scale > 1) {
+            val pct = Math.round((scale - 1) * 1000) / 10.0
             upscaleMs += ms
-            maxUpscalePct = max(maxUpscalePct, Math.round((scale - 1) * 1000) / 10.0)
+            upscalePctMs += pct * ms
+            maxUpscalePct = max(maxUpscalePct, pct)
         } else if (scale < 1) {
+            val pct = Math.round((1 / scale - 1) * 1000) / 10.0
             downscaleMs += ms
+            downscalePctMs += pct * ms
+            maxDownscalePct = max(maxDownscalePct, pct)
         }
     }
 }

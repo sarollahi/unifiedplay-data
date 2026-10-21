@@ -135,6 +135,15 @@ public final class AVPlayerMonitor: PlayerMonitor {
             self?.fail(error)
         }
         on(.AVPlayerItemTimeJumped) { [weak self] _ in self?.jumped() }
+        on(AVPlayerItem.mediaSelectionDidChangeNotification) { [weak self] note in
+            guard let item = note.object as? AVPlayerItem else { return }
+            let asset = item.asset
+            Task { @MainActor [weak self] in
+                // Captions: a legible (subtitle or caption) option is selected.
+                guard let group = try? await asset.loadMediaSelectionGroup(for: .legible) else { return }
+                self?.captions(item.currentMediaSelection.selectedMediaOption(in: group) != nil)
+            }
+        }
         on(.AVPlayerItemNewAccessLogEntry) { [weak self] note in
             guard let self, let item = note.object as? AVPlayerItem, let log = item.accessLog() else { return }
             if let last = log.events.last, last.indicatedBitrate > 0 { kbps = last.indicatedBitrate / 1000 }
