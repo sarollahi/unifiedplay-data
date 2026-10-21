@@ -1,7 +1,8 @@
 name: Publish
 
 # Publishing a GitHub Release (tag v1.2.3) publishes that version: the Android libraries to Maven
-# Central, the web packages to npm. The Swift package needs nothing: SwiftPM reads the tag itself.
+# Central, the web packages to npm. The Swift package needs nothing: SwiftPM reads the tag itself;
+# Roku channels copy the roku/ files of the tag, and Flutter apps take the flutter/ package from it.
 # Secrets: MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD (a Central Portal user token) and
 # SIGNING_KEY / SIGNING_KEY_PASSWORD (the armored GPG key the artifacts are signed with). npm needs
 # no secret: every package trusts this workflow (npm trusted publishing).
@@ -27,6 +28,8 @@ jobs:
           grep -q "SDK_VERSION = \"$version\"" android/core/src/main/kotlin/com/unifiedplay/data/DataClient.kt
           grep -q "sdkVersion = \"$version\"" ios/Sources/UnifiedPlayData/DataClient.swift
           grep -q "SDK_VERSION = '$version'" web/packages/data/src/client.ts
+          grep -q "return \"$version\"" roku/components/UnifiedPlayData.brs
+          grep -qx "version: $version" flutter/pubspec.yaml
           for package in web/packages/*/package.json; do
             test "$(jq -r .version "$package")" = "$version" || { echo "::error file=$package::not $version"; exit 1; }
           done
