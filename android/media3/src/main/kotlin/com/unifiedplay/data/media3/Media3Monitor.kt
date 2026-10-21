@@ -1,6 +1,7 @@
 package com.unifiedplay.data.media3
 
 import androidx.media3.common.C
+import androidx.media3.common.DrmInitData
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaLibraryInfo
@@ -10,11 +11,16 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import com.unifiedplay.data.DataClient
 import com.unifiedplay.data.PlayerInfo
 import com.unifiedplay.data.PlayerMonitor
+import com.unifiedplay.data.RequestInfo
 import com.unifiedplay.data.VideoInfo
 import com.unifiedplay.data.ViewTracker
+import androidx.media3.datasource.HttpDataSource
+import java.io.IOException
 
 /**
  * Watches a Media3 ExoPlayer (any Media3 1.x). A view starts when playback of a media item is
@@ -118,6 +124,7 @@ class Media3Monitor(
     }
 
     override fun onVideoInputFormatChanged(eventTime: AnalyticsListener.EventTime, format: Format, decoderReuseEvaluation: DecoderReuseEvaluation?) {
+        drm(format)
         view?.let { rendition(it, format) }
     }
 
@@ -137,6 +144,68 @@ class Media3Monitor(
     override fun onPlayerError(eventTime: AnalyticsListener.EventTime, error: PlaybackException) {
         current()?.failed(error.errorCodeName, error.message.orEmpty(), fatal = true)
         client.flush()
+    }
+
+    // Network requests (spec: Requests): the player's loads, with their bytes, time and response headers.
+    // It does not report time to first byte.
+    override fun onLoadCompleted(eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+        val type = requestType(mediaLoadData) ?: return
+        requestCompleted(RequestInfo(
+            type = type, hostname = loadEventInfo.uri.host, bytes = loadEventInfo.bytesLoaded,
+            start = loadEventInfo.elapsedRealtimeMs - loadEventInfo.loadDurationMs, responseEnd = loadEventInfo.elapsedRealtimeMs,
+            headers = loadEventInfo.responseHeaders,
+        ))
+    }
+
+    override fun onLoadError(
+        eventTime: AnalyticsListener.EventTime,
+        loadEventInfo: LoadEventInfo,
+        mediaLoadData: MediaLoadData,
+        error: IOException,
+        wasCanceled: Boolean,
+    ) {
+        val type = requestType(mediaLoadData) ?: return
+        if (wasCanceled) {
+            requestCanceled(RequestInfo(type = type, hostname = loadEventInfo.uri.host))
+            return
+        }
+        val status = (error as? HttpDataSource.InvalidResponseCodeException)?.responseCode
+        requestFailed(RequestInfo(type = type, hostname = loadEventInfo.uri.host, headers = loadEventInfo.responseHeaders,
+            error = error.javaClass.simpleName, errorCode = status, errorText = error.message))
+    }
+
+    override fun onLoadCanceled(eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+        val type = requestType(mediaLoadData) ?: return
+        requestCanceled(RequestInfo(type = type, hostname = loadEventInfo.uri.host))
+    }
+
+    private fun requestType(data: MediaLoadData): String? {
+        val track = data.trackType
+        return when (data.dataType) {
+            C.DATA_TYPE_MANIFEST -> "manifest"
+            C.DATA_TYPE_DRM -> "encryption"
+            C.DATA_TYPE_MEDIA_INITIALIZATION -> if (track == C.TRACK_TYPE_AUDIO) "audio_init" else "video_init"
+            C.DATA_TYPE_MEDIA -> when (track) {
+                C.TRACK_TYPE_VIDEO -> "video"
+                C.TRACK_TYPE_AUDIO -> "audio"
+                C.TRACK_TYPE_TEXT -> "subtitle"
+                else -> "media"
+            }
+            else -> null // ads, time sync…: not the content
+        }
+    }
+
+    private fun drm(format: Format) {
+        val init: DrmInitData = format.drmInitData ?: return
+        for (index in 0 until init.schemeDataCount) {
+            val type = when (init.get(index).uuid) {
+                C.WIDEVINE_UUID -> "widevine"
+                C.PLAYREADY_UUID -> "playready"
+                C.CLEARKEY_UUID -> "clearkey"
+                else -> null
+            }
+            if (type != null) { setDrmType(type); return }
+        }
     }
 
     private fun rendition(tracker: ViewTracker, format: Format) {

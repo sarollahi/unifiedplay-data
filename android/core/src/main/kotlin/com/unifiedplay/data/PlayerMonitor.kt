@@ -27,6 +27,10 @@ interface AdTarget {
 abstract class PlayerMonitor(protected val client: DataClient, private val info: PlayerInfo) : AdTarget {
     protected var view: ViewTracker? = null
         private set
+    // Requests before a view exists (the manifest, a preload) go into it when it starts.
+    private val early = mutableListOf<Pair<Int, RequestInfo>>()
+    private var drmType = ""
+    private var mode = "standard"
     private var sourceAt: Long? = null
     private var readyAt: Long? = null
     private var width = 0
@@ -59,6 +63,8 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
         view = null
         sourceAt = if (hasSource) now() else null
         readyAt = null
+        early.clear()
+        drmType = ""
     }
 
     /** The player could start: player startup is done. */
@@ -80,6 +86,10 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
         val source = sourceAt
         val ready = readyAt
         if (source != null && ready != null) next.playerStartup(ready - source)
+        if (drmType.isNotEmpty()) next.setDrmType(drmType)
+        if (mode != "standard") next.playbackMode(mode)
+        for ((kind, request) in early) record(next, kind, request)
+        early.clear()
         onNewView(next)
         client.flush()
         return next
@@ -93,6 +103,43 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
         this.width = width
         this.height = height
         view?.playerSize(width, height)
+    }
+
+    /** A content request came back (the monitors report their player's loads by themselves). */
+    fun requestCompleted(request: RequestInfo) = request(COMPLETED, request)
+
+    fun requestFailed(request: RequestInfo) = request(FAILED, request)
+
+    fun requestCanceled(request: RequestInfo) = request(CANCELED, request)
+
+    /** The DRM in use (widevine, playready, fairplay, clearkey). */
+    fun setDrmType(type: String) {
+        drmType = type
+        view?.setDrmType(type)
+    }
+
+    /** The app's player went fullscreen ("fullscreen"), picture-in-picture ("pip") or back ("standard"). */
+    fun playbackMode(next: String) {
+        mode = next
+        view?.playbackMode(next)
+    }
+
+    private fun request(kind: Int, request: RequestInfo) {
+        val open = view?.takeIf { !it.ended }
+        if (open != null) record(open, kind, request) else if (early.size < MAX_EARLY_REQUESTS) early += kind to request
+    }
+
+    private fun record(view: ViewTracker, kind: Int, request: RequestInfo) = when (kind) {
+        COMPLETED -> view.requestCompleted(request)
+        FAILED -> view.requestFailed(request)
+        else -> view.requestCanceled(request)
+    }
+
+    private companion object {
+        const val COMPLETED = 0
+        const val FAILED = 1
+        const val CANCELED = 2
+        const val MAX_EARLY_REQUESTS = 50
     }
 
     override fun adBreakStart() {

@@ -97,6 +97,44 @@ class ViewTrackerTest {
         view.sent(2)
         assertEquals(listOf("error", "viewend"), view.snapshot().eventTypes())
     }
+
+    @Suppress("UNCHECKED_CAST")
+    @Test
+    fun addsUpRequestsCountsFailuresByTypeAndNamesTheCdn() {
+        val view = ViewTracker(VideoInfo(id = "ep_1", viewSessionId = "cmcd-1"), PlayerInfo("test")) { time }
+        view.requestCompleted(RequestInfo(type = "manifest", start = 0, responseStart = 50, responseEnd = 80, bytes = 2_000, headers = mapOf("X-CDN" to listOf("fastly"))))
+        view.requestCompleted(RequestInfo(type = "video", start = 100, responseStart = 140, responseEnd = 1100, bytes = 1_250_000))
+        view.requestCompleted(RequestInfo(type = "audio", start = 100, responseStart = 160, responseEnd = 600, bytes = 125_000, headers = mapOf("x-cdn" to listOf("cloudflare"))))
+        view.requestCompleted(RequestInfo(type = "video_init", start = 0, responseEnd = 10, bytes = 900))
+        view.requestFailed(RequestInfo(type = "video", hostname = "cdn.example.com", error = "InvalidResponseCodeException", errorCode = 503))
+        view.requestFailed(RequestInfo(type = "encryption", errorCode = 403))
+        view.requestCanceled(RequestInfo(type = "audio"))
+        view.playbackMode("pip"); view.playbackMode("pip"); view.playbackMode("standard")
+        view.setDrmType("widevine")
+        val snapshot = view.snapshot()
+        val metrics = snapshot.metrics()
+        assertEquals(4, metrics["request_completed"])
+        assertEquals(2, metrics["request_failed"])
+        assertEquals(1, metrics["request_canceled"])
+        assertEquals(1, metrics["request_failed_media"])
+        assertEquals(1, metrics["request_failed_encryption"])
+        assertEquals(2, metrics["request_media_completed"])
+        assertEquals(1_375_000L, metrics["request_media_bytes"])
+        assertEquals(1500L, metrics["request_media_ms"])
+        assertEquals(100L, metrics["request_media_ttfb_ms"])
+        assertEquals(2, metrics["request_media_ttfb_count"])
+        assertEquals(60L, metrics["request_media_max_ttfb_ms"])
+        val video = snapshot["video"] as Map<String, Any?>
+        assertEquals("cloudflare", video["cdn"])
+        assertEquals("widevine", video["drm_type"])
+        val player = snapshot["player"] as Map<String, Any?>
+        assertEquals(true, player["pip"])
+        assertEquals(false, player["fullscreen"])
+        assertEquals("cmcd-1", snapshot["view_session_id"])
+        assertEquals(2, snapshot.eventTypes().count { it == "cdnchange" })
+        assertEquals(2, snapshot.eventTypes().count { it == "playbackmodechange" })
+        assertEquals("widevine", drmTypeOf("com.widevine.alpha"))
+    }
 }
 
 class DataClientTest {
@@ -160,4 +198,5 @@ class DataClientTest {
         client.flush()
         assertEquals(2, bodies.size)
     }
+
 }
