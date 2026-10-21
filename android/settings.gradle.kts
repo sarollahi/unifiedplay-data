@@ -8,4 +8,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "unifiedplay-data"
-include(":core")
+include(":core", ":media3", ":exoplayer2", ":mediaplayer")
