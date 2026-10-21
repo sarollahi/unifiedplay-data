@@ -1,0 +1,31 @@
+{
+  "name": "@unifiedplay/data-chromecast",
+  "version": "1.1.0",
+  "description": "UnifiedPlay Data for Chromecast receivers (Cast Application Framework)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "license": "MIT",
+  "homepage": "https://github.com/sarollahi/unifiedplay-data",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sarollahi/unifiedplay-data.git",
+    "directory": "web/packages/data-chromecast"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@unifiedplay/data": "^1.1.0"
+  }
+}
