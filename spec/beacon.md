@@ -1,4 +1,4 @@
-# UnifiedPlay Data — beacon contract (v1)
+# UnifiedPlay Data — beacon contract (v1.1)
 
 All three SDKs (Android, iOS, web) watch a video player and send the same beacon to the
 UnifiedPlay backend. The Console's Analytics → Video data page reads what they send.
@@ -19,6 +19,7 @@ UnifiedPlay backend. The Console's Analytics → Video data page reads what they
 
 ```
 POST {api_base}/api/v1/data/beacons        api_base defaults to https://backend.unifiedplay.com
+                                           (https://{beacon_domain} when one is set, see below)
 X-Tenant-Key: <data key, or a UnifiedPlay app's tenant app key>
 X-Platform: android | ios | web | tvos | roku | …
 Content-Type: application/json
@@ -26,11 +27,19 @@ Content-Type: application/json
 
 No sign-in token. The key says whose views these are:
 
-- **Data key** (`up_data_…`): one per workspace, shown on the Console's Video data page, for
-  any platform. It can only send views; it opens no other API, so it can sit in public code.
+- **Data key** (`up_data_…`): one per environment of a workspace (production and staging),
+  shown on the Console's Video data page, for any platform. It can only send views; it opens
+  no other API, so it can sit in public code. Views keep the environment of the key they came
+  with, and the Console shows one environment at a time (production unless asked).
 - **Tenant app key**: what a UnifiedPlay app already sends (platform-bound).
 
 Web pages send `key` and `platform` in the body instead of headers (see below).
+
+**Beacon domain.** A workspace can send through its own subdomain (`data.example.com`), so ad
+and tracker blockers that drop third-party hosts let the beacons through. The customer adds it
+in the Console and points it at the platform with one CNAME; the platform adds it as a custom
+hostname and issues its certificate. The SDKs then take `beaconDomain` (`beacon_domain`) and
+post to `https://{beacon_domain}/api/v1/data/beacons`; everything else stays the same.
 
 Responses:
 
@@ -73,9 +82,12 @@ loses nothing but its events. `events` holds only the events since the previous 
   "video": {
     "id": "ep_123_ab", "title": "Episode 1", "series_id": "s_9_ab", "series_title": "My series",
     "duration_ms": 92000, "stream_type": "on-demand", "source_type": "hls",
-    "source_host": "media.example.com"
+    "source_host": "media.example.com", "cdn": "cloudflare", "drm_type": "widevine"
   },
-  "player": {"name": "media3", "version": "1.11.0", "width": 1080, "height": 1920, "autoplay": true},
+  "player": {"name": "media3", "version": "1.11.0", "width": 1080, "height": 1920, "autoplay": true,
+             "fullscreen": false, "pip": false},
+  "page": {"type": "watchpage", "url": "https://www.example.com/watch/ep_123_ab"},
+  "view_session_id": "6e1d…",
   "metrics": {
     "player_startup_ms": 120,
     "video_startup_ms": 840,
@@ -99,7 +111,19 @@ loses nothing but its events. `events` holds only the events since the previous 
     "ad_break_count": 1,
     "ad_count": 2,
     "ad_watch_ms": 30000,
-    "ad_error_count": 0
+    "ad_error_count": 0,
+    "request_completed": 58,
+    "request_failed": 1,
+    "request_canceled": 0,
+    "request_failed_manifest": 0,
+    "request_failed_media": 1,
+    "request_failed_encryption": 0,
+    "request_media_completed": 52,
+    "request_media_bytes": 41500000,
+    "request_media_ms": 16600,
+    "request_media_ttfb_ms": 4680,
+    "request_media_ttfb_count": 52,
+    "request_media_max_ttfb_ms": 310
   },
   "custom": {"1": "experiment-b", "2": "sports"},
   "error": null,
@@ -132,7 +156,28 @@ loses nothing but its events. `events` holds only the events since the previous 
 | `ad_count` | ads asked to play. |
 | `ad_watch_ms` | time ads were actually playing. |
 | `ad_error_count` | ads that failed. |
+| `request_completed`, `request_failed`, `request_canceled` | network requests for the content (manifests, segments, init segments, keys and licenses, subtitles) that completed, failed or were aborted. Never ad requests. |
+| `request_failed_manifest`, `_media`, `_encryption` | failed requests by type: manifests and playlists; video, audio and init segments; keys and licenses. |
+| `request_media_completed` | completed media requests: video, audio and media segments (not manifests, init segments, keys or subtitles). |
+| `request_media_bytes`, `request_media_ms` | their bytes, and the time each took from request start to its last byte, added up (parallel requests each count their own time). |
+| `request_media_ttfb_ms`, `request_media_ttfb_count` | the time to first byte of those whose first byte the player reports, added up, and how many those were. |
+| `request_media_max_ttfb_ms` | the longest of those. |
 
+**Requests.** A player that reports its network requests gives the SDK, per request: its type
+(`manifest`, `video`, `audio`, `video_init`, `audio_init`, `media`, `subtitle`,
+`encryption`), start time, first-byte time (when known), end time, bytes, hostname, response
+headers, and for a failure the error name, HTTP status and text. Completed requests only add to
+the totals above; a failed or aborted one is also an event. The `X-CDN` response header, when
+the CDN sets one, names the view's CDN (`video.cdn`, unless the app set it): the latest value
+wins, and each change is a `cdnchange` event.
+
+**View fields.** `video.cdn` and `video.drm_type` (`widevine`, `playready`, `fairplay`,
+`clearkey`) come from the player where it tells, else from the app. `player.fullscreen` and
+`player.pip` say whether the view was ever fullscreen or picture-in-picture; each change of
+mode is a `playbackmodechange` event (`standard`, `fullscreen`, `pip`, or the app's own name).
+`page` is web only: `url` without its query or fragment, `type` `watchpage` or `iframe`.
+`view_session_id` is the app's own id for the view, to join the view with CDN logs: give the
+player's CMCD (`sid`) the same value. The SDKs leave it out when the app sets none.
 Time inside an ad break is not content time: it is neither watch, playing nor rebuffering
 time, and a pre-roll does not count towards video startup time.
 
@@ -143,6 +188,9 @@ each), e.g. an experiment name or a page type. The Console breaks views down by 
 ### Events
 
 `t` is milliseconds since the view started. Types: `viewstart`, `play`, `playing`, `pause`,
+`requestfailed` (`data: {"type", "hostname", "error", "code", "text"}`), `requestcanceled`
+(`data: {"type", "hostname"}`), `cdnchange` (`data: {"cdn"}`), `playbackmodechange`
+(`data: {"mode"}`),
 `seeking`, `seeked`, `rebufferstart`, `rebufferend`, `rendition` (`data: {"kbps", "width",
 "height"}`), `error` (`data: {"code", "message", "fatal"}`), `ended`, `viewend`, and for ads
 `adbreakstart`, `adplay`, `adplaying`, `adpause`, `adended`, `aderror` (`data: {"code",
@@ -195,10 +243,18 @@ Across views (Console):
 | Ad errors % | Σ ad_error_count / Σ ad_count |
 | Views with ads % | views with an ad / views |
 | Scores | mean of each view score |
+| Request throughput | Σ request_media_bytes × 8 / Σ request_media_ms (Mbps) |
+| Request latency | Σ request_media_ttfb_ms / Σ request_media_ttfb_count |
+| Max request latency | mean of the views' request_media_max_ttfb_ms |
+| Request failures % | Σ request_failed / (Σ request_completed + Σ request_failed) |
+| Failed manifest / media / encryption requests | Σ of each |
 
-Breakdowns group these by: platform, os, os version, device model, manufacturer, browser,
-app or site, app version, player, SDK version, country, connection, video, series, stream
-type, source type, CDN host, error code, viewer, custom 1–5.
+Breakdowns group these by: environment, platform, os, os version, device model, manufacturer,
+browser, browser version, app or site, app version, player, player version, SDK version,
+autoplay, fullscreen, picture-in-picture, DRM type, page type, page URL, continent, country,
+region, ASN, connection, video, series, stream type, source type, source hostname, CDN, error
+code, viewer, custom 1–5.
 
-Country comes from the `CF-IPCountry` request header when the request passed through
-Cloudflare. The viewer's IP address is never stored.
+Continent, country, region and ASN come from Cloudflare's request headers when the request
+passed through Cloudflare (`CF-IPContinent`, `CF-IPCountry`, `CF-Region`, and `X-Client-ASN`,
+which a transform rule fills from `ip.src.asnum`). The viewer's IP address is never stored.
