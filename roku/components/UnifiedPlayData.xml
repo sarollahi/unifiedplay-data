@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  UnifiedPlay Data for Roku. Add this component and source/UnifiedPlayDataTracker.brs to your
+  channel, then:
+
+    m.data = CreateObject("roSGNode", "UnifiedPlayData")
+    m.data.config = { key: "up_data_…" }        ' optional: beaconDomain, apiBase, userId
+    m.data.video = m.videoNode                 ' your Video node
+    m.data.control = "run"
+
+  Views start when the Video node's control is set to "play"; a new content ends the view. Set
+  `info` before new content for your own ids ({ id, title, series_id, custom: { "1": "…" } }),
+  and `adEvent` from your ad code ({ type: "adbreakstart" | "adstart" | "adplaying" | "adpause"
+  | "adend" | "aderror" | "adbreakend", code, message }).
+-->
+<component name="UnifiedPlayData" extends="Task">
+    <interface>
+        <field id="config" type="assocarray" />
+        <field id="video" type="node" />
+        <field id="info" type="assocarray" />
+        <field id="adEvent" type="assocarray" />
+        <field id="exit" type="boolean" alwaysNotify="true" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/source/UnifiedPlayDataTracker.brs" />
+    <script type="text/brightscript" uri="UnifiedPlayData.brs" />
+</component>
