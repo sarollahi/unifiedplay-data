@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+.swiftpm/
+/Package.resolved
+node_modules/
+web/packages/*/dist/
+*.tsbuildinfo
+android/.gradle/
+android/**/build/
+android/local.properties
+web/packages/*/LICENSE
