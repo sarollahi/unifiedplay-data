@@ -10,8 +10,50 @@ export interface VideoInfo {
   streamType?: 'on-demand' | 'live'
   sourceType?: string
   sourceHost?: string
+  /** The CDN serving the video, when you know it; otherwise the X-CDN response header names it. */
+  cdn?: string
+  /** widevine, playready, fairplay or clearkey, when the player cannot tell. */
+  drmType?: string
+  /** Your own id for this view, to join it with CDN logs: give your player's CMCD session id (sid) the same value. */
+  viewSessionId?: string
   /** Up to five of your own dimensions (an experiment, a page type…); the Console breaks views down by them. */
   custom?: Partial<Record<1 | 2 | 3 | 4 | 5, string>>
+}
+
+/** What a network request for the content was for (spec: Requests). */
+export type RequestType = 'manifest' | 'video' | 'audio' | 'video_init' | 'audio_init' | 'media' | 'subtitle' | 'encryption'
+
+/** One network request for the content, as the player reports it. Times are milliseconds on any one clock. */
+export interface RequestInfo {
+  type?: RequestType
+  hostname?: string
+  start?: number
+  /** When the first byte arrived, if the player tells. */
+  responseStart?: number
+  responseEnd?: number
+  bytes?: number
+  /** Response headers: X-CDN names the CDN. */
+  headers?: Record<string, string> | ((name: string) => string | null | undefined)
+  /** Failures: the error's name, the HTTP status, its text. */
+  error?: string
+  errorCode?: number | string
+  errorText?: string
+}
+
+export interface PageInfo { type: 'watchpage' | 'iframe'; url: string }
+
+const MEDIA_REQUESTS: ReadonlySet<string> = new Set(['video', 'audio', 'media'])
+const FAILED_BY_TYPE: Record<string, 'request_failed_manifest' | 'request_failed_media' | 'request_failed_encryption'> = {
+  manifest: 'request_failed_manifest', encryption: 'request_failed_encryption',
+  video: 'request_failed_media', audio: 'request_failed_media', media: 'request_failed_media', video_init: 'request_failed_media', audio_init: 'request_failed_media',
+}
+
+function header(headers: RequestInfo['headers'], name: string): string {
+  if (!headers) return ''
+  if (typeof headers === 'function') return headers(name) ?? ''
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) if (key.toLowerCase() === wanted) return value
+  return ''
 }
 
 export interface PlayerInfo {
@@ -29,6 +71,8 @@ export interface ViewSnapshot {
   ended: boolean
   video: Record<string, unknown>
   player: Record<string, unknown>
+  page?: PageInfo
+  view_session_id?: string
   metrics: Record<string, number | null>
   custom: Record<string, string>
   error: { code: string; message: string; fatal: boolean } | null
@@ -68,6 +112,12 @@ export class ViewTracker {
   private adBreakAt = 0
   private startupAdMs = 0
   private adPlayingSince: number | null = null
+  private cdn: string
+  private drmType: string
+  private fullscreen = false
+  private pip = false
+  private mode = 'standard'
+  private page: PageInfo | null = null
   ended = false
 
   readonly metrics = {
@@ -94,6 +144,18 @@ export class ViewTracker {
     ad_count: 0,
     ad_watch_ms: 0,
     ad_error_count: 0,
+    request_completed: 0,
+    request_failed: 0,
+    request_canceled: 0,
+    request_failed_manifest: 0,
+    request_failed_media: 0,
+    request_failed_encryption: 0,
+    request_media_completed: 0,
+    request_media_bytes: 0,
+    request_media_ms: 0,
+    request_media_ttfb_ms: 0,
+    request_media_ttfb_count: 0,
+    request_media_max_ttfb_ms: 0,
   }
 
   constructor(
@@ -103,7 +165,72 @@ export class ViewTracker {
   ) {
     this.t0 = now()
     this.since = this.t0
+    this.cdn = video.cdn ?? ''
+    this.drmType = video.drmType ?? ''
     this.event('viewstart')
+  }
+
+  // Requests, CDN, DRM, playback mode, page ------------------------------------------------------
+
+  /** A content request came back. Media segments add to the throughput and latency totals. */
+  requestCompleted(request: RequestInfo): void {
+    if (this.ended) return
+    this.metrics.request_completed += 1
+    this.cdnFrom(request)
+    if (!MEDIA_REQUESTS.has(request.type ?? 'media')) return
+    const m = this.metrics
+    m.request_media_completed += 1
+    m.request_media_bytes += Math.max(0, request.bytes ?? 0)
+    if (request.start !== undefined && request.responseEnd !== undefined) m.request_media_ms += Math.max(0, request.responseEnd - request.start)
+    if (request.start !== undefined && request.responseStart !== undefined) {
+      const ttfb = Math.max(0, request.responseStart - request.start)
+      m.request_media_ttfb_ms += ttfb
+      m.request_media_ttfb_count += 1
+      m.request_media_max_ttfb_ms = Math.max(m.request_media_max_ttfb_ms, ttfb)
+    }
+  }
+
+  requestFailed(request: RequestInfo): void {
+    if (this.ended) return
+    this.metrics.request_failed += 1
+    const bucket = FAILED_BY_TYPE[request.type ?? '']
+    if (bucket) this.metrics[bucket] += 1
+    this.cdnFrom(request)
+    this.event('requestfailed', {
+      type: request.type ?? null, hostname: request.hostname ?? null, error: request.error ?? null,
+      code: request.errorCode ?? null, text: request.errorText ?? null,
+    })
+  }
+
+  requestCanceled(request: RequestInfo): void {
+    if (this.ended) return
+    this.metrics.request_canceled += 1
+    this.event('requestcanceled', { type: request.type ?? null, hostname: request.hostname ?? null })
+  }
+
+  /** standard, fullscreen, pip, or your own name. */
+  playbackMode(mode: string): void {
+    if (mode === this.mode) return
+    this.mode = mode
+    if (mode === 'fullscreen') this.fullscreen = true
+    if (mode === 'pip') this.pip = true
+    this.event('playbackmodechange', { mode })
+  }
+
+  setDrmType(type: string): void {
+    if (type) this.drmType = type
+  }
+
+  setPage(page: PageInfo): void {
+    this.page = page
+  }
+
+  private cdnFrom(request: RequestInfo): void {
+    // An app-set CDN wins; otherwise the latest X-CDN header names it.
+    const name = header(request.headers, 'x-cdn').trim().slice(0, 64)
+    if (!name || this.video.cdn || name === this.cdn) return
+    this.cdn = name
+    this.event('cdnchange', { cdn: name })
   }
 
   /** How long the player took from getting the source to being able to start (the monitor measures it). */
@@ -304,11 +431,14 @@ export class ViewTracker {
         id: this.video.id, title: this.video.title, series_id: this.video.seriesId, series_title: this.video.seriesTitle,
         duration_ms: this.video.durationMs, stream_type: this.video.streamType ?? 'on-demand',
         source_type: this.video.sourceType, source_host: this.video.sourceHost,
+        cdn: this.cdn || undefined, drm_type: this.drmType || undefined,
       },
       player: {
         name: this.player.name, version: this.player.version, autoplay: Boolean(this.player.autoplay),
-        width: this.playerWidth, height: this.playerHeight,
+        width: this.playerWidth, height: this.playerHeight, fullscreen: this.fullscreen, pip: this.pip,
       },
+      ...(this.page ? { page: this.page } : {}),
+      ...(this.video.viewSessionId ? { view_session_id: this.video.viewSessionId } : {}),
       // Times add up in fractions of a millisecond; the beacon carries whole ones.
       metrics: Object.fromEntries(Object.entries(this.metrics).map(([key, value]) =>
         [key, typeof value === 'number' && key !== 'max_upscale_pct' ? Math.round(value) : value])),
@@ -362,4 +492,19 @@ export class ViewTracker {
       } else if (scale < 1) m.downscale_ms += ms
     }
   }
+}
+
+/** widevine, playready, fairplay or clearkey from a key system name or HLS key format ('' when unknown). */
+export function drmTypeOf(keySystem: string | null | undefined): string {
+  const name = (keySystem ?? '').toLowerCase()
+  if (name.includes('widevine') || name.includes('edef8ba9')) return 'widevine'
+  if (name.includes('playready') || name.includes('9a04f079')) return 'playready'
+  if (name.includes('fairplay') || name.includes('apple.fps') || name.includes('streamingkeydelivery') || name.includes('94ce86fb')) return 'fairplay'
+  if (name.includes('clearkey') || name.includes('e2719d58') || name.includes('1077efec')) return 'clearkey'
+  return ''
+}
+
+/** The host part of a URL ('' when it is not one). */
+export function hostnameOf(url: string | null | undefined): string {
+  try { return url ? new URL(url, typeof location === 'undefined' ? undefined : location.href).hostname : '' } catch { return '' }
 }

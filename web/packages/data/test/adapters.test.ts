@@ -34,7 +34,7 @@ function playing(element: EventTarget) {
 }
 
 function spyMonitor() {
-  return { rendition: vi.fn(), error: vi.fn(), adBreakStart: vi.fn(), adStart: vi.fn(), adPlaying: vi.fn(), adPause: vi.fn(), adEnd: vi.fn(), adError: vi.fn(), adBreakEnd: vi.fn() } as unknown as VideoMonitor & Record<string, ReturnType<typeof vi.fn>>
+  return { rendition: vi.fn(), error: vi.fn(), requestCompleted: vi.fn(), requestFailed: vi.fn(), requestCanceled: vi.fn(), setDrmType: vi.fn(), playbackMode: vi.fn(), adBreakStart: vi.fn(), adStart: vi.fn(), adPlaying: vi.fn(), adPause: vi.fn(), adEnd: vi.fn(), adError: vi.fn(), adBreakEnd: vi.fn() } as unknown as VideoMonitor & Record<string, ReturnType<typeof vi.fn>>
 }
 
 describe('streaming libraries', () => {

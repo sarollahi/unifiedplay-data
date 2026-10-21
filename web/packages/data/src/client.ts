@@ -1,7 +1,7 @@
 import type { ViewTracker } from './tracker.js'
 
 export const SDK_NAME = 'unifiedplay-data-web'
-export const SDK_VERSION = '1.0.0'
+export const SDK_VERSION = '1.1.0'
 export const DEFAULT_API_BASE = 'https://backend.unifiedplay.com'
 const BEACON_PATH = '/api/v1/data/beacons'
 // A beacon carries at most this much, far under the backend's 64 KB; the rest goes with the next ones.
@@ -14,7 +14,18 @@ export interface DataConfig {
   key: string
   /** Where beacons go. Defaults to UnifiedPlay; '' sends to the page's own origin. */
   apiBase?: string
+  /**
+   * Your own beacon host (data.example.com), set up in the Console's Video data page: beacons go
+   * to https://{beaconDomain}, which blockers of other sites' hosts let through. Wins over apiBase.
+   */
+  beaconDomain?: string
   appVersion?: string
+  /** What the beacons say they come from; by default tizen, webos or chromecast on those TVs, else web. */
+  platform?: string
+  /** A device id the app keeps (React Native and TVs without local storage); by default one kept in localStorage. */
+  deviceId?: string
+  /** Device fields the browser cannot tell (os, os_version, manufacturer, model, app_id…), over what it does tell. */
+  device?: Record<string, string>
   /**
    * Your own id for the viewer, if you want views per viewer: an opaque id, never an email.
    * (UnifiedPlay's own apps send the viewer's usr_ id, kept only with analytics consent.)
@@ -46,6 +57,11 @@ function match(ua: string, pattern: RegExp): string {
   return pattern.exec(ua)?.[1]?.replace(/_/g, '.') ?? ''
 }
 
+/** web, or tizen, webos or chromecast when the page runs on one of those TVs. */
+export function webPlatform(ua: string = typeof navigator === 'undefined' ? '' : navigator.userAgent ?? ''): string {
+  return /Tizen/.test(ua) ? 'tizen' : /Web0S|webOS/.test(ua) ? 'webos' : /CrKey/.test(ua) ? 'chromecast' : 'web'
+}
+
 /** What the browser tells about itself. */
 export function webDevice(nav: Navigator = navigator): Record<string, string> {
   const ua = nav.userAgent
@@ -57,7 +73,10 @@ export function webDevice(nav: Navigator = navigator): Record<string, string> {
             : /Safari\//.test(ua) ? ['Safari', match(ua, /Version\/([\d.]+)/)]
               : ['', '']
   const [os, osVersion] =
-    /iPhone|iPad|iPod/.test(ua) ? ['iOS', match(ua, /OS ([\d_]+)/)]
+    /Tizen/.test(ua) ? ['Tizen', match(ua, /Tizen ([\d.]+)/)]
+      : /Web0S|webOS/.test(ua) ? ['webOS', match(ua, /Web0S(?:\.TV)?-?([\d.]+)?/)]
+        : /CrKey/.test(ua) ? ['Cast', match(ua, /CrKey\/([\d.]+)/)]
+          : /iPhone|iPad|iPod/.test(ua) ? ['iOS', match(ua, /OS ([\d_]+)/)]
       : /Android/.test(ua) ? ['Android', match(ua, /Android ([\d.]+)/)]
         : /Mac OS X/.test(ua) ? ['macOS', match(ua, /Mac OS X ([\d_.]+)/)]
           : /Windows/.test(ua) ? ['Windows', match(ua, /Windows NT ([\d.]+)/)]
@@ -65,7 +84,7 @@ export function webDevice(nav: Navigator = navigator): Record<string, string> {
   const connection = (nav as Navigator & { connection?: { type?: string; effectiveType?: string } }).connection
   return {
     os, os_version: osVersion, browser, browser_version: browserVersion,
-    model: /Mobi|Android|iPhone/.test(ua) ? 'Mobile' : /iPad|Tablet/.test(ua) ? 'Tablet' : 'Desktop',
+    model: /Tizen|Web0S|webOS|SMART-TV|CrKey/.test(ua) ? 'TV' : /Mobi|Android|iPhone/.test(ua) ? 'Mobile' : /iPad|Tablet/.test(ua) ? 'Tablet' : 'Desktop',
     connection: connection?.type ?? connection?.effectiveType ?? '',
     app_id: typeof location === 'undefined' ? '' : location.hostname,
   }
@@ -82,7 +101,7 @@ const fetchSend: Send = async (url, body) => {
 export class DataClient {
   private readonly views = new Set<ViewTracker>()
   private readonly sessionId = randomId()
-  private readonly deviceId = deviceId()
+  private readonly deviceId: string
   private readonly device: Record<string, string>
   private timer: ReturnType<typeof setInterval> | null = null
   private inFlight = false
@@ -91,7 +110,8 @@ export class DataClient {
   disabled = false
 
   constructor(private readonly config: DataConfig, private readonly send: Send = fetchSend) {
-    this.device = { ...webDevice(), app_version: config.appVersion ?? '' }
+    this.deviceId = config.deviceId || deviceId()
+    this.device = { ...(typeof navigator === 'undefined' ? {} : webDevice()), app_version: config.appVersion ?? '', ...config.device }
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') void this.flush() })
       window.addEventListener('pagehide', () => { for (const view of this.views) view.end(); void this.flush() })
@@ -117,7 +137,7 @@ export class DataClient {
     const snapshots = views.map(view => view.snapshot(MAX_EVENTS))
     const body = JSON.stringify({
       key: this.config.key,
-      platform: 'web',
+      platform: this.config.platform ?? webPlatform(),
       sdk: { name: SDK_NAME, version: SDK_VERSION },
       session_id: this.sessionId,
       viewer: { device_id: this.deviceId, user_id: this.config.userId ?? '' },
@@ -125,7 +145,8 @@ export class DataClient {
       views: snapshots,
     })
     try {
-      const result = await this.send(`${(this.config.apiBase ?? DEFAULT_API_BASE).replace(/\/$/, '')}${BEACON_PATH}`, body)
+      const base = this.config.beaconDomain ? `https://${this.config.beaconDomain.replace(/^https?:\/\//, '').replace(/\/.*$/, '')}` : (this.config.apiBase ?? DEFAULT_API_BASE)
+      const result = await this.send(`${base.replace(/\/$/, '')}${BEACON_PATH}`, body)
       // 413: too big to ever go through, so its events are dropped (the totals still go next time).
       if ((result.status < 300 && result.enabled !== false) || result.status === 413) {
         views.forEach((view, index) => {

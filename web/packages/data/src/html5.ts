@@ -1,4 +1,4 @@
-import { ViewTracker, type PlayerInfo, type VideoInfo } from './tracker.js'
+import { ViewTracker, type PageInfo, type PlayerInfo, type RequestInfo, type VideoInfo } from './tracker.js'
 import type { DataClient } from './client.js'
 
 export interface VideoMonitor {
@@ -10,6 +10,14 @@ export interface VideoMonitor {
   rendition(kbps: number | null, width: number | null, height: number | null): void
   /** A playback error the streaming library reported. */
   error(code: string, message: string, fatal: boolean): void
+  /** Network requests for the content, from the streaming library (the -hlsjs, -shaka… packages call these). */
+  requestCompleted(request: RequestInfo): void
+  requestFailed(request: RequestInfo): void
+  requestCanceled(request: RequestInfo): void
+  /** The DRM in use (widevine, playready, fairplay, clearkey), from the streaming library or the app. */
+  setDrmType(type: string): void
+  /** standard, fullscreen, pip, or your own name. Fullscreen and picture-in-picture of the element itself are seen by themselves. */
+  playbackMode(mode: string): void
   /** Ads: an ad library (see @unifiedplay/data-ima) or your own ad player calls these. */
   adBreakStart(): void
   adStart(): void
@@ -48,6 +56,18 @@ export interface MonitorOptions {
   sizeOf?: Element | null
 }
 
+// Requests before a view exists (the manifest, a preload) go into it when it starts; a few are enough.
+const MAX_EARLY_REQUESTS = 50
+type EarlyRequest = ['requestCompleted' | 'requestFailed' | 'requestCanceled', RequestInfo]
+
+function pageInfo(): PageInfo | null {
+  if (typeof location === 'undefined') return null
+  let framed = false
+  try { framed = window.self !== window.top } catch { framed = true } // a cross-origin parent
+  // The query and fragment may carry tokens or personal data: never sent.
+  return { type: framed ? 'iframe' : 'watchpage', url: `${location.origin}${location.pathname}` }
+}
+
 const ERROR_NAMES: Record<number, string> = { 1: 'MEDIA_ERR_ABORTED', 2: 'MEDIA_ERR_NETWORK', 3: 'MEDIA_ERR_DECODE', 4: 'MEDIA_ERR_SRC_NOT_SUPPORTED' }
 
 /**
@@ -67,6 +87,9 @@ export function monitorVideo(
   let player = playerInfo
   let view: ViewTracker | null = null
   let rendition: [number | null, number | null, number | null] | null = null
+  let early: EarlyRequest[] = []
+  let drmType = ''
+  let mode = 'standard'
   // Player startup: from the source to the metadata, measured even before anyone presses play.
   let sourceAt: number | null = performance.now()
   let readyAt: number | null = null
@@ -80,6 +103,12 @@ export function monitorVideo(
       view = new ViewTracker(info, { ...player, autoplay: Boolean(element.autoplay) })
       client.add(view)
       size()
+      const page = pageInfo()
+      if (page) view.setPage(page)
+      if (drmType) view.setDrmType(drmType)
+      if (mode !== 'standard') view.playbackMode(mode)
+      for (const [kind, request] of early) view[kind](request)
+      early = []
       if (rendition) view.rendition(...rendition)
       if (sourceAt !== null && readyAt !== null) view.playerStartup(readyAt - sourceAt)
     }
@@ -97,6 +126,8 @@ export function monitorVideo(
       if (view && !view.ended) { view.end(); send() }
       view = null
       rendition = null
+      early = []
+      drmType = ''
       sourceAt = performance.now()
       readyAt = null
     }],
@@ -129,6 +160,27 @@ export function monitorVideo(
     }],
   ]
   for (const [name, handler] of handlers) element.addEventListener(name, handler)
+  // Fullscreen and picture-in-picture of this element (and Safari's presentation modes).
+  const modeNow = () => {
+    const doc = typeof document === 'undefined' ? null : document as Document & { webkitFullscreenElement?: Element | null }
+    const full = doc?.fullscreenElement ?? doc?.webkitFullscreenElement ?? null
+    const presentation = (element as MediaLike & { webkitPresentationMode?: string }).webkitPresentationMode
+    const node = element as unknown as Element
+    const next = doc?.pictureInPictureElement === node || presentation === 'picture-in-picture' ? 'pip'
+      : (full && typeof Node !== 'undefined' && node instanceof Node && (full === node || full.contains(node))) || presentation === 'fullscreen' ? 'fullscreen'
+        : 'standard'
+    if (next === mode) return
+    mode = next
+    view?.playbackMode(next)
+  }
+  const docEvents = ['fullscreenchange', 'webkitfullscreenchange']
+  const elementEvents = ['enterpictureinpicture', 'leavepictureinpicture', 'webkitpresentationmodechanged']
+  if (typeof document !== 'undefined') for (const name of docEvents) document.addEventListener(name, modeNow)
+  for (const name of elementEvents) element.addEventListener(name, modeNow)
+  const request = (kind: EarlyRequest[0]) => (info: RequestInfo) => {
+    if (view && !view.ended) view[kind](info)
+    else if (early.length < MAX_EARLY_REQUESTS) early.push([kind, info])
+  }
   const resizeObserver = sizeOf && typeof ResizeObserver === 'function' ? new ResizeObserver(size) : null
   if (sizeOf) resizeObserver?.observe(sizeOf)
   if ((element.currentSrc || element.src) && !element.paused) current().play()
@@ -145,6 +197,17 @@ export function monitorVideo(
       view.failed(code, message, fatal)
       if (fatal) send()
     },
+    requestCompleted: request('requestCompleted'),
+    requestFailed: request('requestFailed'),
+    requestCanceled: request('requestCanceled'),
+    setDrmType(type) {
+      drmType = type
+      view?.setDrmType(type)
+    },
+    playbackMode(next) {
+      mode = next
+      view?.playbackMode(next)
+    },
     // An ad break means playback was asked for, so it may start the view; the rest only feed one.
     adBreakStart() { current().adBreakStart(); send() },
     adStart() { current().adStart() },
@@ -155,6 +218,8 @@ export function monitorVideo(
     adBreakEnd() { view?.adBreakEnd(); send() },
     destroy() {
       for (const [name, handler] of handlers) element.removeEventListener(name, handler)
+      if (typeof document !== 'undefined') for (const name of docEvents) document.removeEventListener(name, modeNow)
+      for (const name of elementEvents) element.removeEventListener(name, modeNow)
       resizeObserver?.disconnect()
       quality()
       if (view && !view.ended) view.end()
