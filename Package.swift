@@ -9,10 +9,18 @@ let package = Package(
     platforms: [.iOS(.v15), .tvOS(.v15), .macOS(.v12)],
     products: [
         .library(name: "UnifiedPlayData", targets: ["UnifiedPlayData"]),
+        .library(name: "UnifiedPlayDataIMA", targets: ["UnifiedPlayDataIMA"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/googleads/swift-package-manager-google-interactive-media-ads-ios.git", from: "3.30.0"),
     ],
     targets: [
         // Core + AVPlayer (AVFoundation is part of the system).
         .target(name: "UnifiedPlayData", path: "ios/Sources/UnifiedPlayData"),
+        .target(name: "UnifiedPlayDataIMA", dependencies: [
+            "UnifiedPlayData",
+            .product(name: "GoogleInteractiveMediaAds", package: "swift-package-manager-google-interactive-media-ads-ios", condition: .when(platforms: [.iOS])),
+        ], path: "ios/Sources/UnifiedPlayDataIMA"),
         .testTarget(name: "UnifiedPlayDataTests", dependencies: ["UnifiedPlayData"], path: "ios/Tests/UnifiedPlayDataTests"),
     ]
 )
