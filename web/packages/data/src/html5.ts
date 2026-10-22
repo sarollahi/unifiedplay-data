@@ -175,7 +175,8 @@ export function monitorVideo(
       if (view && sourceAt !== null) view.playerStartup(readyAt - sourceAt)
     }],
     ['play', () => {
-      if (!(element.currentSrc || element.src)) sourceless = true
+      // No source, so no metadata yet: not the last source's either.
+      if (!(element.currentSrc || element.src)) { sourceless = true; readyAt = null }
       current().play()
     }],
     ['playing', () => {

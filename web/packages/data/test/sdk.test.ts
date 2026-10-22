@@ -170,6 +170,7 @@ describe('monitorVideo', () => {
     const send = vi.fn(async () => ({ status: 202, enabled: true }))
     const client = new DataClient({ apiBase: '', key: 'k' }, send)
     const element = document.createElement('video')
+    element.src = 'https://cdn.example.test/ep_1.mp4'
     const monitor = monitorVideo(client, element, { id: 'ep_1', title: 'Episode 1' }, { name: 'shaka', version: '4' })
     // Preloaded and never played: no view.
     for (const name of ['loadstart', 'loadedmetadata']) element.dispatchEvent(new Event(name))
@@ -196,7 +197,11 @@ describe('monitorVideo', () => {
     const client = new DataClient({ apiBase: '', key: 'k' }, send)
     const element = document.createElement('video')
     const monitor = monitorVideo(client, element, { id: 'ep_1' })
-    // play() on an empty element; the player attaches its MediaSource 85 ms later.
+    // The last reel's source loaded in 50 ms, then the player emptied the element.
+    element.dispatchEvent(new Event('loadstart'))
+    time += 50
+    for (const name of ['loadedmetadata', 'emptied']) element.dispatchEvent(new Event(name))
+    // play() on the empty element; the player attaches its MediaSource 85 ms later.
     element.dispatchEvent(new Event('play'))
     time += 85
     element.dispatchEvent(new Event('loadstart'))
