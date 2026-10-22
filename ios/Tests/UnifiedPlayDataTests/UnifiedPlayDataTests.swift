@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import UnifiedPlayData
 
@@ -268,5 +269,57 @@ final class DataClientTests: XCTestCase {
         XCTAssertTrue(client.disabled)
         client.flush(); await settle()
         XCTAssertEqual(recorder.requests.count, 2)
+    }
+}
+
+@MainActor
+final class AVPlayerMonitorTests: XCTestCase {
+    /// A 2-second 32×32 Motion JPEG movie: no hardware encoder or audio device needed.
+    private func movie() async throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.jpeg, AVVideoWidthKey: 32, AVVideoHeightKey: 32])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: 32, kCVPixelBufferHeightKey as String: 32,
+        ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<60 {
+            while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 1_000_000) }
+            var buffer: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, try XCTUnwrap(adaptor.pixelBufferPool), &buffer)
+            adaptor.append(try XCTUnwrap(buffer), withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: 30))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    func testVideoStartupWaitsForTheLayersFirstFrameNotAPrerolledItemsPlaying() async throws {
+        let player = AVPlayer(playerItem: AVPlayerItem(url: try await movie()))
+        while player.status != .readyToPlay || player.currentItem?.status != .readyToPlay { try await Task.sleep(nanoseconds: 10_000_000) }
+        let prerolled = await player.preroll(atRate: 1)
+        XCTAssertTrue(prerolled)
+        // The reel comes on screen: a new layer with no frame yet, and play on the same tick.
+        let layer = AVPlayerLayer(player: player)
+        let client = DataClient(config: DataConfig(key: "k"), device: [:], deviceID: "d") { _, done in done(BeaconResponse(status: 202, enabled: true)) }
+        let monitor = AVPlayerMonitor(client: client, player: player, layer: layer) { _ in VideoInfo(id: "reel") }
+        player.play()
+        let asked = Date()
+        while monitor.view?.videoStartupMs == nil, Date().timeIntervalSince(asked) < 5 { try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTAssertTrue(layer.isReadyForDisplay)
+        XCTAssertGreaterThan(try XCTUnwrap(monitor.view?.videoStartupMs), 0)
+        monitor.release()
+    }
+
+    func testPairsTheBitrateWithTheVariantOnScreenNotTheOneDownloading() {
+        let ladder = [(width: 480, height: 270, kbps: 800.0), (1280, 720, 3000), (1280, 720, 4500), (1920, 1080, 8178)]
+        // Switching up: the access log already names 8178 while 270p is still shown.
+        XCTAssertEqual(AVPlayerMonitor.declaredKbps(ladder, width: 480, height: 270, indicated: 8178), 800)
+        XCTAssertEqual(AVPlayerMonitor.declaredKbps(ladder, width: 1920, height: 1080, indicated: nil), 8178)
+        XCTAssertEqual(AVPlayerMonitor.declaredKbps(ladder, width: 1280, height: 720, indicated: 4500), 4500)
+        XCTAssertNil(AVPlayerMonitor.declaredKbps(ladder, width: 1280, height: 720, indicated: 8178))
+        XCTAssertNil(AVPlayerMonitor.declaredKbps([], width: 640, height: 360, indicated: 1200))
     }
 }
