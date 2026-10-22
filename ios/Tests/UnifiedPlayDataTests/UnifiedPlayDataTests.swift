@@ -274,8 +274,8 @@ final class DataClientTests: XCTestCase {
 
 @MainActor
 final class AVPlayerMonitorTests: XCTestCase {
-    /// A 2-second 32×32 Motion JPEG movie: no hardware encoder or audio device needed.
-    private func movie() async throws -> URL {
+    /// A 32×32 Motion JPEG movie at 30 fps: no hardware encoder or audio device needed.
+    private func movie(frames: Int = 60) async throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.jpeg, AVVideoWidthKey: 32, AVVideoHeightKey: 32])
@@ -285,7 +285,7 @@ final class AVPlayerMonitorTests: XCTestCase {
         writer.add(input)
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
-        for frame in 0..<60 {
+        for frame in 0..<frames {
             while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 1_000_000) }
             var buffer: CVPixelBuffer?
             CVPixelBufferPoolCreatePixelBuffer(nil, try XCTUnwrap(adaptor.pixelBufferPool), &buffer)
@@ -310,6 +310,21 @@ final class AVPlayerMonitorTests: XCTestCase {
         while monitor.view?.videoStartupMs == nil, Date().timeIntervalSince(asked) < 5 { try await Task.sleep(nanoseconds: 1_000_000) }
         XCTAssertTrue(layer.isReadyForDisplay)
         XCTAssertGreaterThan(try XCTUnwrap(monitor.view?.videoStartupMs), 0)
+        monitor.release()
+    }
+
+    func testStartsAViewForEachItemAQueuePlayerMovesOnTo() async throws {
+        let first = AVPlayerItem(url: try await movie(frames: 9)), second = AVPlayerItem(url: try await movie(frames: 9))
+        let player = AVQueuePlayer(items: [first, second])
+        let client = DataClient(config: DataConfig(key: "k"), device: [:], deviceID: "d") { _, done in done(BeaconResponse(status: 202, enabled: true)) }
+        let monitor = AVPlayerMonitor(client: client, player: player) { item in VideoInfo(id: item === first ? "first" : "second") }
+        player.play()
+        let asked = Date()
+        while monitor.view?.video.id != "second" || monitor.view?.videoStartupMs == nil, Date().timeIntervalSince(asked) < 5 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(monitor.view?.video.id, "second")
+        XCTAssertNotNil(monitor.view?.videoStartupMs)
         monitor.release()
     }
 

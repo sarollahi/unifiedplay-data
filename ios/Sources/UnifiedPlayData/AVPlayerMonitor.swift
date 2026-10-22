@@ -71,7 +71,6 @@ public final class AVPlayerMonitor: PlayerMonitor {
                 Self.onMain { if layer.isReadyForDisplay { self?.frameShown() } }
             })
         }
-        if player.rate != 0 { current()?.play() }
     }
 
     public override func describe() -> VideoInfo? { player?.currentItem.map(describeItem) }
@@ -181,6 +180,11 @@ public final class AVPlayerMonitor: PlayerMonitor {
                                             error: event.errorDomain, errorCode: event.errorStatusCode, errorText: event.errorComment))
             self?.view?.failed(code: String(event.errorStatusCode), message: event.errorComment ?? "", fatal: false)
         }
+        // Already playing: attached to a playing player, the next item of an AVQueuePlayer or AVPlayerLooper,
+        // or replaceCurrentItem during playback. The rate stays, so no rate change says play.
+        guard let player, player.rate != 0, let view = current() else { return }
+        view.play()
+        if item.status == .readyToPlay, player.timeControlStatus == .playing { playing(player, view) }
     }
 
     /// Network requests (spec: Requests) from the access log: its media requests, bytes and transfer time
