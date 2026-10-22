@@ -1,5 +1,16 @@
 package com.unifiedplay.data
 
+import java.util.Locale
+import java.util.UUID
+
+/** The device's Widevine security level (L1: hardware, L3: software), "" where it cannot tell. */
+val widevineSecurityLevel: String by lazy {
+    runCatching {
+        val drm = android.media.MediaDrm(UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"))
+        try { drm.getPropertyString("securityLevel") } finally { if (android.os.Build.VERSION.SDK_INT >= 28) drm.close() else @Suppress("DEPRECATION") drm.release() }
+    }.getOrDefault("")
+}
+
 /**
  * Takes ad events from an ad library (com.unifiedplay.data:ima) or from your own ad player.
  * Every monitor is one.
@@ -40,6 +51,7 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
     private var readyAt: Long? = null
     private var width = 0
     private var height = 0
+    private val instanceId = UUID.randomUUID().toString()
     private val readPlayer: () -> Unit = { view?.let { beforeBeacon(it) } }
 
     init {
@@ -84,7 +96,7 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
     protected fun current(): ViewTracker? {
         view?.let { if (!it.ended) return it }
         val video = describe() ?: return null
-        val next = ViewTracker(video, info.copy(autoplay = autoplay()))
+        val next = ViewTracker(video, info.copy(autoplay = autoplay(), instanceId = info.instanceId ?: instanceId, language = info.language ?: Locale.getDefault().toLanguageTag()))
         view = next
         client.add(next)
         next.playerSize(width, height)
@@ -92,6 +104,7 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
         val ready = readyAt
         if (source != null && ready != null) next.playerStartup(ready - source)
         if (drmType.isNotEmpty()) next.setDrmType(drmType)
+        if (drmType == "widevine") next.setDrmLevel(widevineSecurityLevel)
         if (mode != "standard") next.playbackMode(mode)
         if (captionsOn) next.captions(true)
         for ((kind, request) in early) record(next, kind, request)
@@ -122,6 +135,7 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
     fun setDrmType(type: String) {
         drmType = type
         view?.setDrmType(type)
+        if (type == "widevine") view?.setDrmLevel(widevineSecurityLevel)
     }
 
     /** Captions turned on or off. */

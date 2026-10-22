@@ -24,6 +24,9 @@ class DataConfig {
     this.beaconDomain,
     this.appVersion = '',
     this.userId,
+    this.viewerPlan,
+    this.viewerPlanStatus,
+    this.viewerPlanCategory,
     this.interval = const Duration(seconds: 10),
     this.device = const {},
   });
@@ -41,6 +44,11 @@ class DataConfig {
 
   /// Your own id for the viewer, if you want views per viewer: an opaque id, never an email.
   final String? userId;
+
+  /// Your own words for the viewer's plan, for breakdowns: plan ("premium"), its status ("trialing"), its category ("sports").
+  final String? viewerPlan;
+  final String? viewerPlanStatus;
+  final String? viewerPlanCategory;
   final Duration interval;
 
   /// Device fields Flutter cannot tell (manufacturer, model, os_version, app_id…).
@@ -133,7 +141,13 @@ class DataClient with WidgetsBindingObserver {
     final body = jsonEncode({
       'sdk': {'name': sdkName, 'version': sdkVersion},
       'session_id': _sessionId,
-      'viewer': {'device_id': _deviceId ?? '', 'user_id': config.userId ?? ''},
+      'viewer': {
+        'device_id': _deviceId ?? '',
+        'user_id': config.userId ?? '',
+        'plan': config.viewerPlan,
+        'plan_status': config.viewerPlanStatus,
+        'plan_category': config.viewerPlanCategory,
+      },
       'device': {'os': _platform, 'app_version': config.appVersion, ...config.device},
       'views': snapshots,
     });

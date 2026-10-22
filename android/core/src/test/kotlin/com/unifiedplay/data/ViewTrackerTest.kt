@@ -248,4 +248,33 @@ class DataClientTest {
         assertEquals(2, bodies.size)
     }
 
+
+    @Test
+    fun countsShiftsAndKeepsTheFirstRenditionCodecsEdgeAndRemotePlay() {
+        var clock = 0L
+        val view = ViewTracker(
+            VideoInfo(id = "ep_1", brand = "Drama+", drmLevel = "L1"),
+            PlayerInfo("main", software = "Media3", softwareVersion = "1.4.1", language = "sv"),
+        ) { clock }
+        view.rendition(1500.0, 1280, 720, RenditionDetails(videoCodec = "avc1.640028"))
+        view.play(); clock += 500; view.playing()
+        view.rendition(3000.0, 1920, 1080, RenditionDetails(framerate = 25.0, dynamicRange = "HDR10"))
+        view.renditionDetails(RenditionDetails(audioCodec = "mp4a.40.2"))
+        view.rendition(800.0, 960, 540)
+        view.requestCompleted(RequestInfo(type = "video", headers = mapOf("CF-Ray" to listOf("8a1b2c3d4e-ARN"))))
+        view.playbackMode("remote")
+        val snapshot = view.snapshot()
+        @Suppress("UNCHECKED_CAST") val metrics = snapshot["metrics"] as Map<String, Any?>
+        assertEquals(1, metrics["rendition_upshifts"])
+        assertEquals(1, metrics["rendition_downshifts"])
+        assertEquals(
+            mapOf("video_codec" to "avc1.640028", "audio_codec" to "mp4a.40.2", "framerate" to 25.0, "dynamic_range" to "HDR10",
+                "initial_bitrate_kbps" to 1500L, "initial_width" to 1280, "initial_height" to 720),
+            snapshot["rendition"],
+        )
+        @Suppress("UNCHECKED_CAST") val video = snapshot["video"] as Map<String, Any?>
+        @Suppress("UNCHECKED_CAST") val player = snapshot["player"] as Map<String, Any?>
+        assertEquals(listOf("Drama+", "L1", "ARN"), listOf(video["brand"], video["drm_level"], video["cdn_edge_pop"]))
+        assertEquals(listOf("Media3", "sv", true), listOf(player["software"], player["language"], player["remote_played"]))
+    }
 }

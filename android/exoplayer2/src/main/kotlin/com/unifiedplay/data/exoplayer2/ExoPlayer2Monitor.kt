@@ -15,6 +15,7 @@ import com.google.android.exoplayer2.source.MediaLoadData
 import com.unifiedplay.data.DataClient
 import com.unifiedplay.data.PlayerInfo
 import com.unifiedplay.data.PlayerMonitor
+import com.unifiedplay.data.RenditionDetails
 import com.unifiedplay.data.RequestInfo
 import com.unifiedplay.data.VideoInfo
 import com.unifiedplay.data.ViewTracker
@@ -34,7 +35,7 @@ class ExoPlayer2Monitor(
     client: DataClient,
     private val player: ExoPlayer,
     private val describeItem: (MediaItem) -> VideoInfo = { VideoInfo(id = it.mediaId.ifEmpty { null }) },
-) : PlayerMonitor(client, PlayerInfo(name = "exoplayer2", version = ExoPlayerLibraryInfo.VERSION)), AnalyticsListener {
+) : PlayerMonitor(client, PlayerInfo(name = "exoplayer2", version = ExoPlayerLibraryInfo.VERSION, software = "ExoPlayer", softwareVersion = ExoPlayerLibraryInfo.VERSION)), AnalyticsListener {
     private var dropped = 0L
 
     init {
@@ -209,6 +210,19 @@ class ExoPlayer2Monitor(
 
     private fun rendition(tracker: ViewTracker, format: Format) {
         val bitrate = format.bitrate.takeIf { it != Format.NO_VALUE }?.let { it / 1000.0 }
-        tracker.rendition(bitrate, format.width.takeIf { it != Format.NO_VALUE }, format.height.takeIf { it != Format.NO_VALUE })
+        val range = when {
+            format.sampleMimeType == "video/dolby-vision" -> "Dolby Vision"
+            format.colorInfo?.colorTransfer == C.COLOR_TRANSFER_ST2084 -> "HDR10"
+            format.colorInfo?.colorTransfer == C.COLOR_TRANSFER_HLG -> "HLG"
+            else -> "SDR"
+        }
+        tracker.rendition(
+            bitrate, format.width.takeIf { it != Format.NO_VALUE }, format.height.takeIf { it != Format.NO_VALUE },
+            RenditionDetails(videoCodec = format.codecs ?: format.sampleMimeType, framerate = format.frameRate.takeIf { it > 0 }?.toDouble(), dynamicRange = range),
+        )
+    }
+
+    override fun onAudioInputFormatChanged(eventTime: AnalyticsListener.EventTime, format: Format, decoderReuseEvaluation: DecoderReuseEvaluation?) {
+        view?.renditionDetails(RenditionDetails(audioCodec = format.codecs ?: format.sampleMimeType))
     }
 }

@@ -1,6 +1,6 @@
 import { hostnameOf, monitorVideo, type DataClient, type RequestType, type VideoInfo, type VideoMonitor } from '@unifiedplay/data'
 
-interface VhsPlaylist { attributes?: { BANDWIDTH?: number; RESOLUTION?: { width: number; height: number } } }
+interface VhsPlaylist { attributes?: { BANDWIDTH?: number; RESOLUTION?: { width: number; height: number }; CODECS?: string; 'FRAME-RATE'?: number | string } }
 /** The XMLHttpRequest Video.js's streaming engine (VHS) made, with what VHS adds to it. */
 interface VhsRequest { uri?: string; requestType?: string; requestTime?: number; aborted?: boolean; response?: ArrayBuffer | string | null; responseText?: string }
 type ResponseHook = (request: VhsRequest, error: unknown, response: { statusCode?: number; headers?: Record<string, string> } | undefined) => void
@@ -31,11 +31,12 @@ export function monitorVideoJs(client: DataClient, player: VideoJsPlayer, video:
   const element = player.el().querySelector('video')
   if (!element) throw new Error('This Video.js player has no <video> element (the html5 tech is needed)')
   // name: 'brightcove' for a Brightcove Player (it is Video.js), so the Console tells them apart.
-  const monitor = monitorVideo(client, element, video, { name, version })
+  const monitor = monitorVideo(client, element, video, { name, version, software: name === 'brightcove' ? 'Brightcove Player' : 'Video.js', softwareVersion: version })
   const vhs = () => player.tech({ IWillNotUseThisInPlugins: true })?.vhs
   const media = () => {
     const attributes = vhs()?.playlists?.media()?.attributes
-    if (attributes) monitor.rendition(attributes.BANDWIDTH ? attributes.BANDWIDTH / 1000 : null, attributes.RESOLUTION?.width ?? null, attributes.RESOLUTION?.height ?? null)
+    if (attributes) monitor.rendition(attributes.BANDWIDTH ? attributes.BANDWIDTH / 1000 : null, attributes.RESOLUTION?.width ?? null, attributes.RESOLUTION?.height ?? null,
+      { videoCodec: attributes.CODECS?.split(',')[0], framerate: Number(attributes['FRAME-RATE']) || undefined })
   }
   // VHS exists once a source is loaded; it reports each rendition change on its playlists.
   const loaded = () => vhs()?.playlists?.on('mediachange', media)

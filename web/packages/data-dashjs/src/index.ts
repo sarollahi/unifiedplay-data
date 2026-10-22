@@ -1,6 +1,6 @@
 import { drmTypeOf, hostnameOf, type RequestType, type VideoMonitor } from '@unifiedplay/data'
 
-interface Representation { bandwidth?: number; width?: number; height?: number }
+interface Representation { bandwidth?: number; width?: number; height?: number; codecs?: string; frameRate?: number | string }
 interface BitrateInfo { bitrate: number; width: number; height: number }
 /** dash.js's own request object (FragmentRequest and friends). */
 interface DashRequest {
@@ -19,6 +19,7 @@ interface DashResponse {
   resourceTiming?: { startTime: number; responseStart?: number; duration: number; encodedBodySize: number }
 }
 interface DashLike {
+  getVersion?(): string
   on(type: string, listener: (event: DashEvent) => void): void
   off(type: string, listener: (event: DashEvent) => void): void
   /** dash.js 4. */
@@ -50,13 +51,18 @@ function requestType(request: DashRequest | undefined): RequestType | null {
  * monitored element. Returns a function that stops listening.
  */
 export function trackDashJs(monitor: VideoMonitor, dash: DashLike): () => void {
+  monitor.playerSoftware?.('dash.js', dash.getVersion?.())
   const rendered = (event: DashEvent) => {
     if (event.mediaType !== 'video') return
     const latency = dash.isDynamic?.() ? dash.getCurrentLiveLatency?.() : undefined
     if (latency && latency > 0) monitor.liveLatency(latency * 1000)
     // dash.js 5 sends the representation; 4 sends an index into the bitrate list.
     const next = event.newRepresentation
-    if (next) { monitor.rendition(next.bandwidth ? next.bandwidth / 1000 : null, next.width ?? null, next.height ?? null); return }
+    if (next) {
+      monitor.rendition(next.bandwidth ? next.bandwidth / 1000 : null, next.width ?? null, next.height ?? null,
+        { videoCodec: next.codecs?.split('"').join(''), framerate: Number(next.frameRate) || undefined })
+      return
+    }
     const info = event.newQuality === undefined ? undefined : dash.getBitrateInfoListFor?.('video')[event.newQuality]
     if (info) monitor.rendition(info.bitrate / 1000, info.width || null, info.height || null)
   }

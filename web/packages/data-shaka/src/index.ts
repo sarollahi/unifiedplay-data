@@ -1,6 +1,9 @@
 import { drmTypeOf, hostnameOf, type RequestType, type VideoMonitor } from '@unifiedplay/data'
 
-interface ShakaVariant { active: boolean; bandwidth: number; width: number | null; height: number | null }
+interface ShakaVariant {
+  active: boolean; bandwidth: number; width: number | null; height: number | null
+  videoCodec?: string | null; audioCodec?: string | null; frameRate?: number | null; hdr?: string | null
+}
 type ShakaErrorEvent = Event & { detail?: { code?: number; category?: number; severity?: number; message?: string; data?: unknown[] } }
 interface ShakaResponse { uri: string; data?: ArrayBuffer | ArrayBufferView; headers?: Record<string, string>; timeMs?: number }
 interface ShakaContext { type?: number; stream?: { type?: string } | null }
@@ -37,9 +40,12 @@ function requestType(type: number, context?: ShakaContext): RequestType | null {
  * playing into a monitored element. Returns a function that stops listening.
  */
 export function trackShaka(monitor: VideoMonitor, shaka: ShakaLike): () => void {
+  monitor.playerSoftware?.('Shaka Player', (shaka.constructor as { version?: string }).version?.replace(/^v/, ''))
   const variant = () => {
     const active = shaka.getVariantTracks().find(track => track.active)
-    if (active) monitor.rendition(active.bandwidth / 1000, active.width, active.height)
+    if (active) monitor.rendition(active.bandwidth / 1000, active.width, active.height, {
+      videoCodec: active.videoCodec ?? undefined, audioCodec: active.audioCodec ?? undefined, framerate: active.frameRate ?? undefined, dynamicRange: active.hdr ?? undefined,
+    })
     const latency = shaka.isLive?.() ? shaka.getStats?.().liveLatency : undefined
     if (latency && latency > 0) monitor.liveLatency(latency * 1000)
     const drm = drmTypeOf(shaka.drmInfo?.()?.keySystem)

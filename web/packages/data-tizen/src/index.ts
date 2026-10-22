@@ -50,7 +50,7 @@ export function monitorAvPlay(
   describe: (url: string) => VideoInfo = url => ({ id: url }),
   version?: string,
 ): PlayerDriver & { stop(): void } {
-  const driver = playerDriver(client, { name: 'avplay', version })
+  const driver = playerDriver(client, { name: 'avplay', version, software: 'AVPlay', softwareVersion: version })
   const original: Partial<Record<Methods, (...args: never[]) => unknown>> = {}
   let appListener: AvPlayListener = {}
   let seekingNow = false

@@ -1,6 +1,6 @@
 import { drmTypeOf, hostnameOf, type RequestInfo, type RequestType, type VideoMonitor } from '@unifiedplay/data'
 
-interface HlsLevel { bitrate: number; width: number; height: number }
+interface HlsLevel { bitrate: number; width: number; height: number; videoCodec?: string; audioCodec?: string; frameRate?: number; videoRange?: string }
 interface HlsStats { loaded: number; loading: { start: number; first: number; end: number } }
 interface HlsFragment { type?: string; sn?: number | 'initSegment'; url?: string | null; stats?: HlsStats; decryptdata?: { keyFormat?: string } | null }
 /** An XMLHttpRequest (xhr loader) or a fetch Response (fetch loader). */
@@ -52,10 +52,13 @@ function loaded(type: RequestType, url: string | null | undefined, stats: HlsSta
  * element. Returns a function that stops listening.
  */
 export function trackHlsJs(monitor: VideoMonitor, hls: HlsLike): () => void {
+  monitor.playerSoftware?.('hls.js', (hls.constructor as { version?: string }).version)
   const listeners: Record<string, (event: string, data: HlsData) => void> = {
     hlsLevelSwitched: (_, data) => {
       const level = data.level === undefined ? undefined : hls.levels[data.level]
-      if (level) monitor.rendition(level.bitrate / 1000, level.width || null, level.height || null)
+      if (level) monitor.rendition(level.bitrate / 1000, level.width || null, level.height || null, {
+        videoCodec: level.videoCodec, audioCodec: level.audioCodec, framerate: Number(level.frameRate) || undefined, dynamicRange: level.videoRange,
+      })
     },
     hlsManifestLoaded: (_, data) => monitor.requestCompleted(loaded('manifest', data.url, data.stats, data.networkDetails)),
     hlsLevelLoaded: (_, data) => monitor.requestCompleted(loaded('manifest', data.context?.url, data.stats, data.networkDetails)),

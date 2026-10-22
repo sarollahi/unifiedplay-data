@@ -26,10 +26,17 @@ public struct DataConfig: Sendable {
     /// Your own id for the viewer, if you want views per viewer: an opaque id, never an email.
     /// (UnifiedPlay's own apps send the viewer's usr_ id, kept only with analytics consent.)
     public var userID: String?
+    /// Your own words for the viewer's plan, for breakdowns: plan ("premium"), its status ("trialing"), its category ("sports").
+    public var viewerPlan: String?
+    public var viewerPlanStatus: String?
+    public var viewerPlanCategory: String?
     public var interval: TimeInterval
 
     public init(key: String, apiBase: URL = defaultAPIBase, beaconDomain: String? = nil, appVersion: String? = nil, userID: String? = nil,
-                interval: TimeInterval = 10) {
+                interval: TimeInterval = 10, viewerPlan: String? = nil, viewerPlanStatus: String? = nil, viewerPlanCategory: String? = nil) {
+        self.viewerPlan = viewerPlan
+        self.viewerPlanStatus = viewerPlanStatus
+        self.viewerPlanCategory = viewerPlanCategory
         self.key = key
         self.apiBase = apiBase
         self.beaconDomain = beaconDomain
@@ -89,6 +96,13 @@ public final class DataClient {
         config.userID = userID
     }
 
+    /// The viewer's plan changed (signed in, subscribed): the next beacons carry it.
+    public func setViewerPlan(_ plan: String?, status: String? = nil, category: String? = nil) {
+        config.viewerPlan = plan
+        config.viewerPlanStatus = status
+        config.viewerPlanCategory = category
+    }
+
     public func add(_ view: ViewTracker) {
         guard !disabled else { return }
         views.append(view)
@@ -134,7 +148,8 @@ public final class DataClient {
         let body: [String: Any] = [
             "sdk": ["name": sdkName, "version": sdkVersion],
             "session_id": sessionID,
-            "viewer": ["device_id": deviceID, "user_id": config.userID ?? ""],
+            "viewer": ["device_id": deviceID, "user_id": config.userID ?? "", "plan": config.viewerPlan ?? "",
+                       "plan_status": config.viewerPlanStatus ?? "", "plan_category": config.viewerPlanCategory ?? ""],
             // The network can change during the session; a device given in tests keeps its own.
             "device": device.merging(["connection": Connection.shared.current]) { given, _ in given },
             "views": snapshots,
@@ -231,11 +246,21 @@ private func appleDevice(appVersion: String?) -> [String: String] {
     #if canImport(UIKit)
     let os = UIDevice.current.systemName
     let osVersion = UIDevice.current.systemVersion
+    let category: String
+    switch UIDevice.current.userInterfaceIdiom {
+    case .tv: category = "tv"
+    case .pad: category = "tablet"
+    case .phone: category = "phone"
+    case .mac: category = "desktop"
+    default: category = ""
+    }
     #else
     let os = "macOS"
     let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
+    let category = "desktop"
     #endif
     return [
+        "category": category,
         "os": os,
         "os_version": osVersion,
         "manufacturer": "Apple",

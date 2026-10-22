@@ -33,7 +33,7 @@ class MediaPlayerMonitor private constructor(
     client: DataClient,
     private val mediaPlayer: MediaPlayer?,
     private val videoView: VideoView?,
-) : PlayerMonitor(client, PlayerInfo(name = if (videoView != null) "videoview" else "mediaplayer", version = Build.VERSION.RELEASE)) {
+) : PlayerMonitor(client, PlayerInfo(name = if (videoView != null) "videoview" else "mediaplayer", version = Build.VERSION.RELEASE, software = "MediaPlayer", softwareVersion = Build.VERSION.RELEASE)) {
 
     constructor(client: DataClient, player: MediaPlayer) : this(client, player, null)
     constructor(client: DataClient, videoView: VideoView) : this(client, null, videoView)

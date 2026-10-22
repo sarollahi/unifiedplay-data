@@ -1,6 +1,6 @@
 import type { DataClient } from './client.js'
-import { takePageLoad, type VideoMonitor } from './html5.js'
-import { ViewTracker, type PageInfo, type PlayerInfo, type RequestInfo, type VideoInfo } from './tracker.js'
+import { newInstanceId, takePageLoad, type VideoMonitor } from './html5.js'
+import { ViewTracker, type PageInfo, type PlayerInfo, type RenditionDetails, type RequestInfo, type VideoInfo } from './tracker.js'
 
 /**
  * A monitor for players that are no HTML5 element (JW Player, the Cast receiver, Tizen's AVPlay,
@@ -42,7 +42,8 @@ export function playerDriver(client: DataClient, playerInfo: PlayerInfo, page: P
   let view: ViewTracker | null = null
   let sourceAt: number | null = null
   let readyAt: number | null = null
-  let rendition: [number | null, number | null, number | null] | null = null
+  let rendition: [number | null, number | null, number | null, RenditionDetails?] | null = null
+  const instanceId = newInstanceId()
   let size: [number, number] | null = null
   let early: Array<[RequestKind, RequestInfo]> = []
   let drmType = ''
@@ -55,7 +56,7 @@ export function playerDriver(client: DataClient, playerInfo: PlayerInfo, page: P
   const current = (): ViewTracker | null => {
     if (view && !view.ended) return view
     if (!video) return null
-    view = new ViewTracker(video, player)
+    view = new ViewTracker(video, { language: typeof navigator === 'undefined' ? undefined : navigator.language, instanceId, ...player })
     client.add(view)
     if (page) view.setPage(page)
     if (pageLoad !== null) view.pageLoad(pageLoad)
@@ -113,9 +114,10 @@ export function playerDriver(client: DataClient, playerInfo: PlayerInfo, page: P
     completed() { if (view && !view.ended) { view.completed(); send() } },
     setVideo(next) { video = next },
     setPlayer(next) { player = next },
-    rendition(kbps, width, height) {
-      rendition = [kbps, width, height]
-      view?.rendition(kbps, width, height)
+    playerSoftware(name, version) { player = { ...player, software: name, softwareVersion: version ?? player.softwareVersion } },
+    rendition(kbps, width, height, details) {
+      rendition = [kbps, width, height, details]
+      view?.rendition(kbps, width, height, details)
     },
     error(code, message, fatal, businessException = false) {
       // A source that fails while someone wants it played is a failed view; a preloaded one is nobody's.

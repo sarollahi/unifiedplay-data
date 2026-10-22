@@ -30,13 +30,28 @@ public struct VideoInfo: Sendable {
     public var subPropertyID: String?
     /// Up to ten of your own dimensions (1...10); the Console breaks views down by them.
     public var custom: [Int: String]
+    /// Who distributes or sells the video (a partner channel).
+    public var affiliate: String?
+    /// The brand the video is under.
+    public var brand: String?
+    public var producer: String?
+    /// The creator's id, for services with many creators.
+    public var creatorID: String?
+    /// Your id for the variant (see variantName).
+    public var variantID: String?
 
     public init(id: String? = nil, title: String? = nil, seriesID: String? = nil, seriesTitle: String? = nil,
                 durationMs: Int? = nil, streamType: String = "on-demand", sourceType: String? = nil, sourceHost: String? = nil,
                 cdn: String? = nil, drmType: String? = nil, viewSessionID: String? = nil,
                 contentType: String? = nil, languageCode: String? = nil, variantName: String? = nil, encodingVariant: String? = nil,
                 experimentName: String? = nil, subPropertyID: String? = nil,
-                custom: [Int: String] = [:]) {
+                custom: [Int: String] = [:], affiliate: String? = nil, brand: String? = nil, producer: String? = nil,
+                creatorID: String? = nil, variantID: String? = nil) {
+        self.affiliate = affiliate
+        self.brand = brand
+        self.producer = producer
+        self.creatorID = creatorID
+        self.variantID = variantID
         self.id = id
         self.title = title
         self.seriesID = seriesID
@@ -97,16 +112,60 @@ private let mediaRequests: Set<String> = ["video", "audio", "media"]
 private let failedMedia: Set<String> = ["video", "audio", "media", "video_init", "audio_init"]
 
 public struct PlayerInfo: Sendable {
+    /// Your name for this player ("main", "tv-player"); the Console groups views by it.
     public var name: String
     public var version: String?
     public var autoplay: Bool
+    /// The player library and its version (AVPlayer…); the monitors fill these.
+    public var software: String?
+    public var softwareVersion: String?
+    /// One id per player, made by the monitor.
+    public var instanceID: String?
+    /// The viewer's language, by default the device's.
+    public var language: String?
+    /// The player loads the video before play is asked for.
+    public var preload: Bool
+    /// A live stream the viewer can pause and rewind (DVR window).
+    public var timeShift: Bool
 
-    public init(name: String, version: String? = nil, autoplay: Bool = false) {
+    public init(name: String, version: String? = nil, autoplay: Bool = false, software: String? = nil, softwareVersion: String? = nil,
+                instanceID: String? = nil, language: String? = nil, preload: Bool = false, timeShift: Bool = false) {
         self.name = name
         self.version = version
         self.autoplay = autoplay
+        self.software = software
+        self.softwareVersion = softwareVersion
+        self.instanceID = instanceID
+        self.language = language
+        self.preload = preload
+        self.timeShift = timeShift
     }
 }
+
+/// What the playing rendition is, where the player tells.
+public struct RenditionDetails: Sendable {
+    public var videoCodec: String?
+    public var audioCodec: String?
+    public var framerate: Double?
+    /// SDR, HDR10, HLG, Dolby Vision…
+    public var dynamicRange: String?
+
+    public init(videoCodec: String? = nil, audioCodec: String? = nil, framerate: Double? = nil, dynamicRange: String? = nil) {
+        self.videoCodec = videoCodec
+        self.audioCodec = audioCodec
+        self.framerate = framerate
+        self.dynamicRange = dynamicRange
+    }
+}
+
+// Response headers that name the CDN edge (point of presence) that served a request.
+private let popHeaders: [(String, (String) -> String)] = [
+    ("x-amz-cf-pop", { $0 }),
+    ("x-served-by", { String($0.split(separator: ",").last ?? "").trimmingCharacters(in: .whitespaces).split(separator: "-").last.map(String.init) ?? "" }),
+    ("cf-ray", { $0.split(separator: "-").last.map(String.init) ?? "" }),
+    ("x-edge-location", { $0 }),
+    ("x-cdn-pop", { $0 }),
+]
 
 /// One view: what happened since playback of one video was asked for, and the totals the beacon
 /// carries (spec/beacon.md). The web (tracker.ts) and Android (ViewTracker.kt) SDKs do the same.
@@ -149,6 +208,13 @@ public final class ViewTracker {
     private var prerollAt: Double?
     private var adRequestAt: Double?
     private var adResponseAt: Double?
+    private var details = RenditionDetails()
+    private var initial: (kbps: Double?, width: Int?, height: Int?)?
+    private var remote = false
+    private var edgePop = ""
+    private var upshifts = 0
+    private var downshifts = 0
+    private var drmLevel = ""
     public private(set) var ended = false
 
     private var playerStartupMs: Double?
@@ -272,12 +338,13 @@ public final class ViewTracker {
         event("adresponse")
     }
 
-    /// standard, fullscreen, pip, or your own name.
+    /// standard, fullscreen, pip, remote (AirPlay, another screen), or your own name.
     public func playbackMode(_ next: String) {
         guard next != mode else { return }
         mode = next
         if next == "fullscreen" { fullscreen = true }
         if next == "pip" { pip = true }
+        if next == "remote" { remote = true }
         event("playbackmodechange", ["mode": next])
     }
 
@@ -285,7 +352,24 @@ public final class ViewTracker {
         if !type.isEmpty { drmType = type }
     }
 
+    /// The DRM's security level, when the app knows it.
+    public func setDrmLevel(_ level: String) {
+        if !level.isEmpty { drmLevel = level }
+    }
+
+    /// Codecs, frame rate or dynamic range of what plays, as the player tells them (any part at a time).
+    public func renditionDetails(_ next: RenditionDetails) {
+        details = RenditionDetails(videoCodec: next.videoCodec ?? details.videoCodec, audioCodec: next.audioCodec ?? details.audioCodec,
+                                   framerate: next.framerate ?? details.framerate, dynamicRange: next.dynamicRange ?? details.dynamicRange)
+    }
+
     private func cdn(from request: RequestInfo) {
+        for (name, read) in popHeaders {
+            if let value = request.headers.first(where: { $0.key.lowercased() == name })?.value.trimmingCharacters(in: .whitespaces), !value.isEmpty {
+                edgePop = String(read(value).prefix(64))
+                break
+            }
+        }
         // An app-set CDN wins; otherwise the latest X-CDN header names it.
         guard let name = request.headers.first(where: { $0.key.lowercased() == "x-cdn" })?.value.trimmingCharacters(in: .whitespaces).prefix(64),
               !name.isEmpty, video.cdn == nil, String(name) != cdn else { return }
@@ -357,11 +441,20 @@ public final class ViewTracker {
         if paused { move(.paused) }
     }
 
-    public func rendition(kbps: Double?, width: Int?, height: Int?) {
+    public func rendition(kbps: Double?, width: Int?, height: Int?, details: RenditionDetails? = nil) {
         guard state != .ad else { return } // an ad's own rendition, in players that play ads themselves
+        if let details { renditionDetails(details) }
         guard kbps != self.kbps || width != videoWidth || height != videoHeight else { return }
         account()
-        if firstFrame { renditionChanges += 1 }
+        if initial == nil, kbps != nil || width != nil { initial = (kbps, width, height) }
+        if firstFrame {
+            renditionChanges += 1
+            // Up or down by bitrate, or by size where the player tells no bitrate.
+            let pair: (Double?, Double?) = kbps != nil && self.kbps != nil ? (self.kbps, kbps) : (videoHeight.map(Double.init), height.map(Double.init))
+            if let before = pair.0, let after = pair.1, after != before {
+                if after > before { upshifts += 1 } else { downshifts += 1 }
+            }
+        }
         self.kbps = kbps
         videoWidth = width
         videoHeight = height
@@ -542,6 +635,8 @@ public final class ViewTracker {
             "upscale_pct_ms": Int(upscalePctMs.rounded()),
             "downscale_pct_ms": Int(downscalePctMs.rounded()),
             "max_downscale_pct": maxDownscalePct,
+            "rendition_upshifts": upshifts,
+            "rendition_downshifts": downshifts,
         ]
         return [
             "view_id": viewID,
@@ -554,11 +649,21 @@ public final class ViewTracker {
                 "stream_type": video.streamType, "source_type": json(video.sourceType), "source_host": json(video.sourceHost),
                 "cdn": json(cdn.isEmpty ? nil : cdn), "drm_type": json(drmType.isEmpty ? nil : drmType),
                 "content_type": json(video.contentType), "language_code": json(video.languageCode),
-                "variant_name": json(video.variantName), "encoding_variant": json(video.encodingVariant),
+                "variant_name": json(video.variantName), "variant_id": json(video.variantID), "encoding_variant": json(video.encodingVariant),
+                "affiliate": json(video.affiliate), "brand": json(video.brand), "producer": json(video.producer),
+                "creator_id": json(video.creatorID), "drm_level": json(drmLevel.isEmpty ? nil : drmLevel),
+                "cdn_edge_pop": json(edgePop.isEmpty ? nil : edgePop),
             ],
             "player": [
                 "name": player.name, "version": json(player.version), "autoplay": player.autoplay,
                 "width": json(playerWidth), "height": json(playerHeight), "fullscreen": fullscreen, "pip": pip, "captions": captionsOn,
+                "software": json(player.software), "software_version": json(player.softwareVersion), "instance_id": json(player.instanceID),
+                "language": json(player.language), "preload": player.preload, "remote_played": remote, "time_shift": player.timeShift,
+            ],
+            "rendition": [
+                "video_codec": json(details.videoCodec), "audio_codec": json(details.audioCodec), "framerate": json(details.framerate),
+                "dynamic_range": json(details.dynamicRange), "initial_bitrate_kbps": json(initial?.kbps.map { Int($0.rounded()) }),
+                "initial_width": json(initial?.width), "initial_height": json(initial?.height),
             ],
             "view_session_id": json(video.viewSessionID),
             "experiment_name": json(video.experimentName),

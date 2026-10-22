@@ -64,7 +64,7 @@ events of each; the rest go with the next beacons.
   "device": {
     "os": "Android", "os_version": "15", "manufacturer": "Google", "model": "Pixel 8",
     "browser": null, "browser_version": null, "app_id": "com.example.tv", "app_version": "1.4.0",
-    "connection": "wifi"
+    "connection": "wifi", "category": "phone"
   },
   "views": [ <view>, … ]
 }
@@ -142,6 +142,11 @@ loses nothing but its events. `events` holds only the events since the previous 
 }
 ```
 
+`viewer` may also carry the app's own words for the viewer's plan: `plan` ("premium"),
+`plan_status` ("trialing"), `plan_category` ("sports"). `device.category` is `tv`, `phone`,
+`tablet`, `desktop`, `chromecast` or `console` (the backend works it out from the platform, OS,
+model and user agent when the SDK leaves it out); the web SDK also sends `device.user_agent`.
+
 `error`, when the view failed: `{"code": "2004", "message": "Source error", "fatal": true,
 "business_exception": false}`. A fatal error the app marks `business_exception` (its own rule
 stopped playback: a geo-block, a paywall, too many streams) ends the view without failing it.
@@ -190,6 +195,22 @@ headers, and for a failure the error name, HTTP status and text. Completed reque
 the totals above; a failed or aborted one is also an event. The `X-CDN` response header, when
 the CDN sets one, names the view's CDN (`video.cdn`, unless the app set it): the latest value
 wins, and each change is a `cdnchange` event.
+
+**Rendition, player and video details.** `rendition` holds what the player tells about what
+plays: `video_codec` and `audio_codec` (as the player names them: `avc1.640028`, `hvc1`, `mp4a`),
+`framerate`, `dynamic_range` (`SDR`, `HDR10`, `HLG`, `Dolby Vision`), and the first rendition of
+the view: `initial_bitrate_kbps`, `initial_width`, `initial_height`. `metrics.rendition_upshifts`
+and `rendition_downshifts` count quality switches up and down after the first frame (by bitrate,
+or by size where the player tells no bitrate). `player.software` and `software_version` name the
+player library (`Shaka Player`, `Media3`, `AVPlayer`…) where `player.name` is the app's own name for
+the player; `player.instance_id` is one id per player, `player.language` the viewer's language,
+`player.poster` the poster image's address without its query, `player.preload` whether the player
+loads before play, `player.time_shift` a live stream the viewer can rewind, and
+`player.remote_played` whether the view played on another screen (AirPlay, Cast, the Remote
+Playback API: a `playbackmodechange` to `remote`). `video.affiliate`, `brand`, `producer`,
+`creator_id` and `variant_id` are the app's; `video.drm_level` is the DRM's security level
+(Widevine `L1` / `L3`, read by the Android SDK); `video.cdn_edge_pop` is the CDN edge that served
+the last request, from `X-Amz-Cf-Pop`, `X-Served-By`, `CF-Ray`, `X-Edge-Location` or `X-CDN-PoP`.
 
 **More view fields.** `video.content_type` (episode, movie, trailer…), `video.language_code`,
 `video.variant_name`, `video.encoding_variant`, `experiment_name` (an A/B test) and
@@ -292,6 +313,11 @@ Across views (Console):
 | Max request latency | mean of the views' request_media_max_ttfb_ms |
 | Request failures % | Σ request_failed / (Σ request_completed + Σ request_failed) |
 | Failed manifest / media / encryption requests | Σ of each |
+| Views dropped % | views the SDK stopped sending for without ending them / views |
+| Playing time per view | Σ playing_ms / views (average) and the median |
+| Average completion | mean of min(playhead_ms / duration_ms, 1) over on-demand views with a length |
+| Medians and 95th percentiles per view | player startup, page load, aggregate startup, rebuffer duration and count, rendition changes, upshifts, downshifts, upscale and downscale amounts (each view's average and largest), live latency; bitrate's poorer views are its 5th percentile |
+| Negative impact (Insights, breakdowns) | (value − overall value) in the bad direction × the group's share of the views |
 
 Breakdowns group these by: environment, platform, os, os version, device model, manufacturer,
 browser, browser version, app or site, app version, player, player version, SDK version,
@@ -300,6 +326,16 @@ country, region, ASN, connection, video, series, content type, language, variant
 variant, experiment, sub-property, stream type, source type, source hostname, CDN, error code,
 viewer, custom 1–10.
 
-Continent, country, region and ASN come from Cloudflare's request headers when the request
-passed through Cloudflare (`CF-IPContinent`, `CF-IPCountry`, `CF-Region`, and `X-Client-ASN`,
-which a transform rule fills from `ip.src.asnum`). The viewer's IP address is never stored.
+Breakdowns also group by device category and name, player software and its version, player
+language, poster, preload, playing on another screen, time shift, DRM level, video and audio codec,
+dynamic range, video height and initial height, CDN trace (every CDN a view used) and edge, viewer
+plan, plan status and plan category, video affiliate, brand, producer, creator and variant id, city,
+error message (grouped: addresses, ids, long numbers and decoder names taken out), and the view's
+own outcome: playback failure, video startup failure, exited before video start, business
+exception, startup business exception, view dropped (the SDK stopped sending without ending the
+view), has ad.
+
+Continent, country, region, city (with its coordinates rounded to a tenth of a degree) and ASN come
+from Cloudflare's request headers when the request passed through Cloudflare (`CF-IPContinent`,
+`CF-IPCountry`, `CF-Region`, `CF-IPCity`, `CF-IPLatitude`, `CF-IPLongitude`, and `X-Client-ASN`, which
+a transform rule fills from `ip.src.asnum`). The viewer's IP address is never stored.

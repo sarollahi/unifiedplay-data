@@ -28,6 +28,17 @@ export interface VideoInfo {
   experimentName?: string
   /** A part of your service (a site, a customer, a channel). */
   subPropertyId?: string
+  /** Who distributes or sells the video (a partner channel). */
+  affiliate?: string
+  /** The brand the video is under. */
+  brand?: string
+  producer?: string
+  /** The creator's id, for services with many creators. */
+  creatorId?: string
+  /** Your id for the variant (see variantName). */
+  variantId?: string
+  /** Widevine L1 / L3, PlayReady SL2000 / SL3000…, when the player cannot tell. */
+  drmLevel?: string
   /** Up to ten of your own dimensions; the Console breaks views down by them. */
   custom?: Partial<Record<1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10, string>>
 }
@@ -69,10 +80,42 @@ function header(headers: RequestInfo['headers'], name: string): string {
 }
 
 export interface PlayerInfo {
+  /** Your name for this player ("main", "tv-player"); the Console groups views by it. */
   name: string
   version?: string
   autoplay?: boolean
+  /** The player library and its version ("Shaka Player", "4.13.25"); the streaming packages fill these. */
+  software?: string
+  softwareVersion?: string
+  /** One id per player on the page, made by the monitor. */
+  instanceId?: string
+  /** The viewer's language, by default the browser's. */
+  language?: string
+  /** The poster image's address (without its query). */
+  poster?: string
+  /** The player loads the video before play is asked for. */
+  preload?: boolean
+  /** A live stream the viewer can pause and rewind (DVR window). */
+  timeShift?: boolean
 }
+
+/** What the playing rendition is, where the player tells. */
+export interface RenditionDetails {
+  videoCodec?: string
+  audioCodec?: string
+  framerate?: number
+  /** SDR, HDR10, HLG, Dolby Vision… */
+  dynamicRange?: string
+}
+
+// Response headers that name the CDN edge (point of presence) that served a request.
+const POP_HEADERS: Array<[string, (value: string) => string]> = [
+  ['x-amz-cf-pop', value => value],
+  ['x-served-by', value => value.split(',').pop()!.trim().split('-').pop() ?? ''],
+  ['cf-ray', value => value.split('-').pop() ?? ''],
+  ['x-edge-location', value => value],
+  ['x-cdn-pop', value => value],
+]
 
 export interface BeaconEvent { t: number; type: string; data?: Record<string, unknown> }
 
@@ -83,6 +126,7 @@ export interface ViewSnapshot {
   ended: boolean
   video: Record<string, unknown>
   player: Record<string, unknown>
+  rendition: Record<string, unknown>
   page?: PageInfo
   view_session_id?: string
   metrics: Record<string, number | null>
@@ -137,6 +181,10 @@ export class ViewTracker {
   private prerollAt: number | null = null
   private adRequestAt: number | null = null
   private adResponseAt: number | null = null
+  private details: RenditionDetails = {}
+  private initial: { kbps: number | null; width: number | null; height: number | null } | null = null
+  private remote = false
+  private edgePop = ''
   ended = false
 
   readonly metrics = {
@@ -184,6 +232,8 @@ export class ViewTracker {
     upscale_pct_ms: 0,
     downscale_pct_ms: 0,
     max_downscale_pct: 0,
+    rendition_upshifts: 0,
+    rendition_downshifts: 0,
   }
 
   constructor(
@@ -236,12 +286,13 @@ export class ViewTracker {
     this.event('requestcanceled', { type: request.type ?? null, hostname: request.hostname ?? null })
   }
 
-  /** standard, fullscreen, pip, or your own name. */
+  /** standard, fullscreen, pip, remote (AirPlay, Cast, Remote Playback), or your own name. */
   playbackMode(mode: string): void {
     if (mode === this.mode) return
     this.mode = mode
     if (mode === 'fullscreen') this.fullscreen = true
     if (mode === 'pip') this.pip = true
+    if (mode === 'remote') this.remote = true
     this.event('playbackmodechange', { mode })
   }
 
@@ -264,6 +315,10 @@ export class ViewTracker {
   }
 
   private cdnFrom(request: RequestInfo): void {
+    for (const [name, read] of POP_HEADERS) {
+      const value = header(request.headers, name).trim()
+      if (value) { this.edgePop = read(value).slice(0, 64); break }
+    }
     // An app-set CDN wins; otherwise the latest X-CDN header names it.
     const name = header(request.headers, 'x-cdn').trim().slice(0, 64)
     if (!name || this.video.cdn || name === this.cdn) return
@@ -335,11 +390,18 @@ export class ViewTracker {
     if (paused) this.move('paused')
   }
 
-  rendition(kbps: number | null, width: number | null, height: number | null): void {
+  rendition(kbps: number | null, width: number | null, height: number | null, details?: RenditionDetails): void {
     if (this.state === 'ad') return // an ad's own rendition, in players that play ads themselves
+    if (details) this.details = { ...this.details, ...Object.fromEntries(Object.entries(details).filter(([, value]) => value)) }
     if (kbps === this.kbps && width === this.videoWidth && height === this.videoHeight) return
     this.account()
-    if (this.firstFrame) this.metrics.rendition_changes += 1
+    this.initial ??= kbps !== null || width !== null ? { kbps, width, height } : null
+    if (this.firstFrame) {
+      this.metrics.rendition_changes += 1
+      // Up or down by bitrate, or by size where the player tells no bitrate.
+      const [before, after] = kbps !== null && this.kbps !== null ? [this.kbps, kbps] : [this.videoHeight, height]
+      if (before !== null && after !== null && after !== before) this.metrics[after > before ? 'rendition_upshifts' : 'rendition_downshifts'] += 1
+    }
     this.kbps = kbps
     this.videoWidth = width
     this.videoHeight = height
@@ -510,11 +572,21 @@ export class ViewTracker {
         source_type: this.video.sourceType, source_host: this.video.sourceHost,
         cdn: this.cdn || undefined, drm_type: this.drmType || undefined,
         content_type: this.video.contentType, language_code: this.video.languageCode,
-        variant_name: this.video.variantName, encoding_variant: this.video.encodingVariant,
+        variant_name: this.video.variantName, variant_id: this.video.variantId, encoding_variant: this.video.encodingVariant,
+        affiliate: this.video.affiliate, brand: this.video.brand, producer: this.video.producer, creator_id: this.video.creatorId,
+        drm_level: this.video.drmLevel, cdn_edge_pop: this.edgePop || undefined,
       },
       player: {
         name: this.player.name, version: this.player.version, autoplay: Boolean(this.player.autoplay),
         width: this.playerWidth, height: this.playerHeight, fullscreen: this.fullscreen, pip: this.pip, captions: this.captionsOn,
+        software: this.player.software, software_version: this.player.softwareVersion, instance_id: this.player.instanceId,
+        language: this.player.language, poster: this.player.poster, preload: Boolean(this.player.preload),
+        remote_played: this.remote, time_shift: Boolean(this.player.timeShift),
+      },
+      rendition: {
+        video_codec: this.details.videoCodec, audio_codec: this.details.audioCodec, framerate: this.details.framerate,
+        dynamic_range: this.details.dynamicRange, initial_bitrate_kbps: this.initial?.kbps ?? undefined,
+        initial_width: this.initial?.width ?? undefined, initial_height: this.initial?.height ?? undefined,
       },
       ...(this.video.experimentName ? { experiment_name: this.video.experimentName } : {}),
       ...(this.video.subPropertyId ? { sub_property_id: this.video.subPropertyId } : {}),

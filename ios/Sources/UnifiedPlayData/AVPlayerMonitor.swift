@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 
 /// Watches an AVPlayer. A view starts when playback of an item is asked for, so a preloaded item
@@ -44,7 +45,7 @@ public final class AVPlayerMonitor: PlayerMonitor {
         self.player = player
         self.layer = layer
         describeItem = describe
-        super.init(client: client, player: PlayerInfo(name: "avplayer"))
+        super.init(client: client, player: PlayerInfo(name: "avplayer", software: "AVPlayer", softwareVersion: ProcessInfo.processInfo.operatingSystemVersionString))
         playerObservations = [
             player.observe(\.currentItem, options: [.initial, .new]) { [weak self] player, _ in
                 Self.onMain { self?.itemChanged(player.currentItem) }
@@ -55,6 +56,10 @@ public final class AVPlayerMonitor: PlayerMonitor {
             },
             player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
                 Self.onMain { self?.statusChanged(player) }
+            },
+            // AirPlay: the view played on another screen.
+            player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] player, _ in
+                Self.onMain { if player.isExternalPlaybackActive { self?.playbackMode("remote") } }
             },
         ]
         if player.rate != 0 { current()?.play() }
@@ -236,6 +241,31 @@ public final class AVPlayerMonitor: PlayerMonitor {
 
     private func renditionChanged(_ item: AVPlayerItem) {
         let size = item.presentationSize
-        view?.rendition(kbps: kbps, width: size.width > 0 ? Int(size.width) : nil, height: size.height > 0 ? Int(size.height) : nil)
+        view?.rendition(kbps: kbps, width: size.width > 0 ? Int(size.width) : nil, height: size.height > 0 ? Int(size.height) : nil,
+                        details: Self.details(of: item))
+    }
+
+    /// Codecs (as FourCC: avc1, hvc1, dvh1, mp4a…), frame rate and dynamic range of the item's playing tracks.
+    static func details(of item: AVPlayerItem) -> RenditionDetails {
+        var details = RenditionDetails()
+        for track in item.tracks where track.isEnabled {
+            guard let asset = track.assetTrack else { continue }
+            let code = (asset.formatDescriptions.first).map { fourCC(CMFormatDescriptionGetMediaSubType($0 as! CMFormatDescription)) }
+            if asset.mediaType == .video {
+                details.videoCodec = code
+                if asset.nominalFrameRate > 0 { details.framerate = Double(asset.nominalFrameRate) }
+                if #available(iOS 14, tvOS 14, macOS 11, *) {
+                    details.dynamicRange = code?.hasPrefix("dv") == true ? "Dolby Vision" : asset.hasMediaCharacteristic(.containsHDRVideo) ? "HDR" : "SDR"
+                }
+            } else if asset.mediaType == .audio {
+                details.audioCodec = code
+            }
+        }
+        return details
+    }
+
+    private static func fourCC(_ code: FourCharCode) -> String {
+        let bytes = [24, 16, 8, 0].map { UInt8((code >> $0) & 0xFF) }
+        return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespaces)
     }
 }

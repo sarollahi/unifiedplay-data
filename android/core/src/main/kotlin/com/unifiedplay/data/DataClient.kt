@@ -41,6 +41,10 @@ data class DataConfig(
      * (UnifiedPlay's own apps send the viewer's usr_ id, kept only with analytics consent.)
      */
     val userId: String? = null,
+    /** Your own words for the viewer's plan, for breakdowns: plan ("premium"), its status ("trialing"), its category ("sports"). */
+    val viewerPlan: String? = null,
+    val viewerPlanStatus: String? = null,
+    val viewerPlanCategory: String? = null,
     val intervalMs: Long = 10_000,
 )
 
@@ -81,6 +85,11 @@ class DataClient internal constructor(
 
     fun setUserId(userId: String?) {
         config = config.copy(userId = userId)
+    }
+
+    /** The viewer's plan changed (signed in, subscribed): the next beacons carry it. */
+    fun setViewerPlan(plan: String?, status: String? = null, category: String? = null) {
+        config = config.copy(viewerPlan = plan, viewerPlanStatus = status, viewerPlanCategory = category)
     }
 
     fun add(view: ViewTracker) {
@@ -125,7 +134,10 @@ class DataClient internal constructor(
             mapOf(
                 "sdk" to mapOf("name" to SDK_NAME, "version" to SDK_VERSION),
                 "session_id" to sessionId,
-                "viewer" to mapOf("device_id" to deviceId, "user_id" to (config.userId ?: "")),
+                "viewer" to mapOf(
+                    "device_id" to deviceId, "user_id" to (config.userId ?: ""),
+                    "plan" to config.viewerPlan, "plan_status" to config.viewerPlanStatus, "plan_category" to config.viewerPlanCategory,
+                ),
                 "device" to device,
                 "views" to snapshots,
             ),
@@ -191,7 +203,13 @@ private fun androidDevice(context: Context, appVersion: String): Map<String, Str
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty() }.getOrDefault("")
     }
     val tv = context.packageManager.hasSystemFeature("android.software.leanback")
+    val category = when {
+        tv -> "tv"
+        context.resources.configuration.smallestScreenWidthDp >= 600 -> "tablet"
+        else -> "phone"
+    }
     return mapOf(
+        "category" to category,
         "os" to if (tv) "Android TV" else "Android",
         "os_version" to Build.VERSION.RELEASE.orEmpty(),
         "manufacturer" to Build.MANUFACTURER.orEmpty(),

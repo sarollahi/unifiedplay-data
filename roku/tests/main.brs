@@ -8,6 +8,7 @@ sub main()
     failures = failures + readsTheVideoNodesSegments()
     failures = failures + timesPreRollRequestsAndLoading()
     failures = failures + weighsScalingAndKeepsBusinessExceptionsApart()
+    failures = failures + countsShiftsAndKeepsTheFirstRendition()
     if failures = 0 then print "ALL PASSED" else print "FAILED: "; failures
 end sub
 
@@ -164,5 +165,21 @@ function weighsScalingAndKeepsBusinessExceptionsApart() as integer
     f = f + check("business_exception", s.error.business_exception, true)
     f = f + check("captions", s.player.captions, true)
     if f = 0 then print "ok - weighs scaling amounts and keeps business exceptions apart"
+    return f
+end function
+
+function countsShiftsAndKeepsTheFirstRendition() as integer
+    clock = { ms: 0# }
+    view = UPD_NewTracker({ id: "ep_1", brand: "Drama+" }, { name: "roku", software: "Roku Video", language: "sv-SE" }, clock)
+    view.rendition(1500, 1280, 720, { video_codec: "hevc" })
+    view.play() : clock.ms = clock.ms + 500 : view.playing()
+    view.rendition(3000, 1920, 1080, invalid)
+    view.rendition(800, 960, 540, { audio_codec: "aac" })
+    s = view.snapshot(100)
+    f = 0
+    f = f + check("upshifts", s.metrics.rendition_upshifts, 1)
+    f = f + check("downshifts", s.metrics.rendition_downshifts, 1)
+    f = f + check("rendition", [s.rendition.video_codec, s.rendition.audio_codec, s.rendition.initial_bitrate_kbps, s.rendition.initial_height], ["hevc", "aac", 1500, 720])
+    f = f + check("player", [s.player.software, s.player.language, s.video.brand], ["Roku Video", "sv-SE", "Drama+"])
     return f
 end function

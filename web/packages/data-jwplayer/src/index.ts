@@ -29,7 +29,7 @@ export function monitorJwPlayer(
   describe: (item: NonNullable<ReturnType<JwPlayerLike['getPlaylistItem']>>) => VideoInfo = item => ({ id: item.mediaid, title: item.title }),
 ): PlayerDriver & { stop(): void } {
   const version = player.version ?? (globalThis as { jwplayer?: { version?: string } }).jwplayer?.version
-  const driver = playerDriver(client, { name: 'jwplayer', version: version?.split('+')[0] }, pageInfo())
+  const driver = playerDriver(client, { name: 'jwplayer', version: version?.split('+')[0], software: 'JW Player', softwareVersion: version?.split('+')[0] }, pageInfo())
   const item = () => {
     const current = player.getPlaylistItem()
     return current ? { durationMs: current.duration ? current.duration * 1000 : undefined, ...describe(current) } : null
