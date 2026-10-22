@@ -188,6 +188,30 @@ describe('monitorVideo', () => {
     expect(views.some((view: { video: { id: string } }) => view.video.id === 'ep_2')).toBe(true)
     monitor.destroy()
   })
+
+  it('keeps the view when play comes before the source', async () => {
+    let time = 1000
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => time)
+    const send = vi.fn(async () => ({ status: 202, enabled: true }))
+    const client = new DataClient({ apiBase: '', key: 'k' }, send)
+    const element = document.createElement('video')
+    const monitor = monitorVideo(client, element, { id: 'ep_1' })
+    // play() on an empty element; the player attaches its MediaSource 85 ms later.
+    element.dispatchEvent(new Event('play'))
+    time += 85
+    element.dispatchEvent(new Event('loadstart'))
+    time += 300
+    element.dispatchEvent(new Event('loadedmetadata'))
+    time += 200
+    element.dispatchEvent(new Event('playing'))
+    await vi.waitFor(() => expect(send).toHaveBeenCalled())
+    await client.flush()
+    const views = send.mock.calls.flatMap(call => JSON.parse((call as unknown as [string, string])[1]).views)
+    expect(new Set(views.map((view: { view_id: string }) => view.view_id)).size).toBe(1)
+    expect(views.at(-1)).toMatchObject({ ended: false, metrics: { video_startup_ms: 585, player_startup_ms: 300 } })
+    monitor.destroy()
+    now.mockRestore()
+  })
 })
 
 describe('webDevice', () => {

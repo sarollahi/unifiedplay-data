@@ -96,7 +96,8 @@ const ERROR_NAMES: Record<number, string> = { 1: 'MEDIA_ERR_ABORTED', 2: 'MEDIA_
 
 /**
  * Watches an HTML5 video element. A view starts when playback of a source is asked for, so a
- * preloaded video nobody plays is no view; a new source (loadstart) ends the view. Pair it with
+ * preloaded video nobody plays is no view; a new source (loadstart) ends the view, unless play
+ * was asked for before the element had any source and that source is only now arriving. Pair it with
  * a streaming library's package (@unifiedplay/data-hlsjs, -shaka, -dashjs…) for bitrates.
  */
 export function monitorVideo(
@@ -119,6 +120,8 @@ export function monitorVideo(
   // Player startup: from the source to the metadata, measured even before anyone presses play.
   let sourceAt: number | null = performance.now()
   let readyAt: number | null = null
+  // play() came before any source (players that attach their MediaSource after asking to play).
+  let sourceless = false
 
   const size = () => {
     const ratio = typeof devicePixelRatio === 'number' ? devicePixelRatio : 1
@@ -153,21 +156,28 @@ export function monitorVideo(
 
   const handlers: Array<[string, () => void]> = [
     [options.sourceEvent ?? 'loadstart', () => {
+      const awaited = sourceless && view !== null && !view.ended && view.metrics.video_startup_ms === null
+      sourceless = false
+      sourceAt = performance.now()
+      readyAt = null
+      // The source the open view was waiting for: same view, its startup still running.
+      if (awaited) return
       // A new source: the previous view is over.
       if (view && !view.ended) { view.end(); send() }
       view = null
       rendition = null
       early = []
       drmType = ''
-      sourceAt = performance.now()
-      readyAt = null
     }],
     ['emptied', () => { if (view && !view.ended) { view.end(); send() } }],
     ['loadedmetadata', () => {
       readyAt = performance.now()
       if (view && sourceAt !== null) view.playerStartup(readyAt - sourceAt)
     }],
-    ['play', () => current().play()],
+    ['play', () => {
+      if (!(element.currentSrc || element.src)) sourceless = true
+      current().play()
+    }],
     ['playing', () => {
       const first = view?.metrics.video_startup_ms === null
       current().playing()
