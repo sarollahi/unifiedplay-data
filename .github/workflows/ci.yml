@@ -53,3 +53,33 @@ jobs:
       - run: swift test
       - run: xcodebuild -scheme UnifiedPlayData-Package -destination 'generic/platform=iOS Simulator' build
       - run: xcodebuild -scheme UnifiedPlayData-Package -destination 'generic/platform=tvOS Simulator' build
+
+  # The Roku tracker in brs-node (a BrightScript interpreter); the SceneGraph task needs a Roku.
+  roku:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - run: |
+          npx --yes --package=brs-node@2.6.1 brs-cli roku/source/UnifiedPlayDataTracker.brs roku/components/UnifiedPlayData.brs roku/tests/main.brs | tee roku-tests.txt
+          grep -q "ALL PASSED" roku-tests.txt
+
+  flutter:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flutter
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test

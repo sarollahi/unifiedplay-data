@@ -10,15 +10,112 @@ export interface VideoInfo {
   streamType?: 'on-demand' | 'live'
   sourceType?: string
   sourceHost?: string
-  /** Up to five of your own dimensions (an experiment, a page type…); the Console breaks views down by them. */
-  custom?: Partial<Record<1 | 2 | 3 | 4 | 5, string>>
+  /** The CDN serving the video, when you know it; otherwise the X-CDN response header names it. */
+  cdn?: string
+  /** widevine, playready, fairplay or clearkey, when the player cannot tell. */
+  drmType?: string
+  /** Your own id for this view, to join it with CDN logs: give your player's CMCD session id (sid) the same value. */
+  viewSessionId?: string
+  /** episode, movie, trailer, clip, live… */
+  contentType?: string
+  /** The audio language, e.g. en, sv. */
+  languageCode?: string
+  /** Which variant of the video (a cut, a dub). */
+  variantName?: string
+  /** Which encoding ladder or settings, for comparing encodings. */
+  encodingVariant?: string
+  /** An A/B test this view is in. */
+  experimentName?: string
+  /** A part of your service (a site, a customer, a channel). */
+  subPropertyId?: string
+  /** Who distributes or sells the video (a partner channel). */
+  affiliate?: string
+  /** The brand the video is under. */
+  brand?: string
+  producer?: string
+  /** The creator's id, for services with many creators. */
+  creatorId?: string
+  /** Your id for the variant (see variantName). */
+  variantId?: string
+  /** Widevine L1 / L3, PlayReady SL2000 / SL3000…, when the player cannot tell. */
+  drmLevel?: string
+  /** Up to ten of your own dimensions; the Console breaks views down by them. */
+  custom?: Partial<Record<1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10, string>>
+}
+
+/** What a network request for the content was for (spec: Requests). */
+export type RequestType = 'manifest' | 'video' | 'audio' | 'video_init' | 'audio_init' | 'media' | 'subtitle' | 'encryption'
+
+/** One network request for the content, as the player reports it. Times are milliseconds on any one clock. */
+export interface RequestInfo {
+  type?: RequestType
+  hostname?: string
+  start?: number
+  /** When the first byte arrived, if the player tells. */
+  responseStart?: number
+  responseEnd?: number
+  bytes?: number
+  /** Response headers: X-CDN names the CDN. */
+  headers?: Record<string, string> | ((name: string) => string | null | undefined)
+  /** Failures: the error's name, the HTTP status, its text. */
+  error?: string
+  errorCode?: number | string
+  errorText?: string
+}
+
+export interface PageInfo { type: 'watchpage' | 'iframe'; url: string }
+
+const MEDIA_REQUESTS: ReadonlySet<string> = new Set(['video', 'audio', 'media'])
+const FAILED_BY_TYPE: Record<string, 'request_failed_manifest' | 'request_failed_media' | 'request_failed_encryption'> = {
+  manifest: 'request_failed_manifest', encryption: 'request_failed_encryption',
+  video: 'request_failed_media', audio: 'request_failed_media', media: 'request_failed_media', video_init: 'request_failed_media', audio_init: 'request_failed_media',
+}
+
+function header(headers: RequestInfo['headers'], name: string): string {
+  if (!headers) return ''
+  if (typeof headers === 'function') return headers(name) ?? ''
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) if (key.toLowerCase() === wanted) return value
+  return ''
 }
 
 export interface PlayerInfo {
+  /** Your name for this player ("main", "tv-player"); the Console groups views by it. */
   name: string
   version?: string
   autoplay?: boolean
+  /** The player library and its version ("Shaka Player", "4.13.25"); the streaming packages fill these. */
+  software?: string
+  softwareVersion?: string
+  /** One id per player on the page, made by the monitor. */
+  instanceId?: string
+  /** The viewer's language, by default the browser's. */
+  language?: string
+  /** The poster image's address (without its query). */
+  poster?: string
+  /** The player loads the video before play is asked for. */
+  preload?: boolean
+  /** A live stream the viewer can pause and rewind (DVR window). */
+  timeShift?: boolean
 }
+
+/** What the playing rendition is, where the player tells. */
+export interface RenditionDetails {
+  videoCodec?: string
+  audioCodec?: string
+  framerate?: number
+  /** SDR, HDR10, HLG, Dolby Vision… */
+  dynamicRange?: string
+}
+
+// Response headers that name the CDN edge (point of presence) that served a request.
+const POP_HEADERS: Array<[string, (value: string) => string]> = [
+  ['x-amz-cf-pop', value => value],
+  ['x-served-by', value => value.split(',').pop()!.trim().split('-').pop() ?? ''],
+  ['cf-ray', value => value.split('-').pop() ?? ''],
+  ['x-edge-location', value => value],
+  ['x-cdn-pop', value => value],
+]
 
 export interface BeaconEvent { t: number; type: string; data?: Record<string, unknown> }
 
@@ -29,10 +126,15 @@ export interface ViewSnapshot {
   ended: boolean
   video: Record<string, unknown>
   player: Record<string, unknown>
+  rendition: Record<string, unknown>
+  page?: PageInfo
+  view_session_id?: string
   metrics: Record<string, number | null>
   custom: Record<string, string>
-  error: { code: string; message: string; fatal: boolean } | null
+  error: { code: string; message: string; fatal: boolean; business_exception: boolean } | null
   events: BeaconEvent[]
+  experiment_name?: string
+  sub_property_id?: string
 }
 
 type State = 'idle' | 'starting' | 'playing' | 'paused' | 'rebuffering' | 'seeking' | 'ad' | 'ended'
@@ -55,7 +157,7 @@ export class ViewTracker {
   private playRequestedAt: number | null = null
   private firstFrame = false
   private events: BeaconEvent[] = []
-  private error: { code: string; message: string; fatal: boolean } | null = null
+  private error: { code: string; message: string; fatal: boolean; business_exception: boolean } | null = null
   private kbps: number | null = null
   private bitrateMs = 0
   private bitratePlayingMs = 0
@@ -68,6 +170,21 @@ export class ViewTracker {
   private adBreakAt = 0
   private startupAdMs = 0
   private adPlayingSince: number | null = null
+  private cdn: string
+  private drmType: string
+  private fullscreen = false
+  private pip = false
+  private mode = 'standard'
+  private page: PageInfo | null = null
+  private captionsOn = false
+  // Pre-roll (spec: Startup): when it was asked to play, the open ad request, the last ad response.
+  private prerollAt: number | null = null
+  private adRequestAt: number | null = null
+  private adResponseAt: number | null = null
+  private details: RenditionDetails = {}
+  private initial: { kbps: number | null; width: number | null; height: number | null } | null = null
+  private remote = false
+  private edgePop = ''
   ended = false
 
   readonly metrics = {
@@ -94,6 +211,29 @@ export class ViewTracker {
     ad_count: 0,
     ad_watch_ms: 0,
     ad_error_count: 0,
+    request_completed: 0,
+    request_failed: 0,
+    request_canceled: 0,
+    request_failed_manifest: 0,
+    request_failed_media: 0,
+    request_failed_encryption: 0,
+    request_media_completed: 0,
+    request_media_bytes: 0,
+    request_media_ms: 0,
+    request_media_ttfb_ms: 0,
+    request_media_ttfb_count: 0,
+    request_media_max_ttfb_ms: 0,
+    content_startup_ms: null as number | null,
+    ad_startup_ms: null as number | null,
+    preroll_request_ms: null as number | null,
+    preroll_load_ms: null as number | null,
+    preroll_requests: 0,
+    page_load_ms: null as number | null,
+    upscale_pct_ms: 0,
+    downscale_pct_ms: 0,
+    max_downscale_pct: 0,
+    rendition_upshifts: 0,
+    rendition_downshifts: 0,
   }
 
   constructor(
@@ -103,7 +243,87 @@ export class ViewTracker {
   ) {
     this.t0 = now()
     this.since = this.t0
+    this.cdn = video.cdn ?? ''
+    this.drmType = video.drmType ?? ''
     this.event('viewstart')
+  }
+
+  // Requests, CDN, DRM, playback mode, page ------------------------------------------------------
+
+  /** A content request came back. Media segments add to the throughput and latency totals. */
+  requestCompleted(request: RequestInfo): void {
+    if (this.ended) return
+    this.metrics.request_completed += 1
+    this.cdnFrom(request)
+    if (!MEDIA_REQUESTS.has(request.type ?? 'media')) return
+    const m = this.metrics
+    m.request_media_completed += 1
+    m.request_media_bytes += Math.max(0, request.bytes ?? 0)
+    if (request.start !== undefined && request.responseEnd !== undefined) m.request_media_ms += Math.max(0, request.responseEnd - request.start)
+    if (request.start !== undefined && request.responseStart !== undefined) {
+      const ttfb = Math.max(0, request.responseStart - request.start)
+      m.request_media_ttfb_ms += ttfb
+      m.request_media_ttfb_count += 1
+      m.request_media_max_ttfb_ms = Math.max(m.request_media_max_ttfb_ms, ttfb)
+    }
+  }
+
+  requestFailed(request: RequestInfo): void {
+    if (this.ended) return
+    this.metrics.request_failed += 1
+    const bucket = FAILED_BY_TYPE[request.type ?? '']
+    if (bucket) this.metrics[bucket] += 1
+    this.cdnFrom(request)
+    this.event('requestfailed', {
+      type: request.type ?? null, hostname: request.hostname ?? null, error: request.error ?? null,
+      code: request.errorCode ?? null, text: request.errorText ?? null,
+    })
+  }
+
+  requestCanceled(request: RequestInfo): void {
+    if (this.ended) return
+    this.metrics.request_canceled += 1
+    this.event('requestcanceled', { type: request.type ?? null, hostname: request.hostname ?? null })
+  }
+
+  /** standard, fullscreen, pip, remote (AirPlay, Cast, Remote Playback), or your own name. */
+  playbackMode(mode: string): void {
+    if (mode === this.mode) return
+    this.mode = mode
+    if (mode === 'fullscreen') this.fullscreen = true
+    if (mode === 'pip') this.pip = true
+    if (mode === 'remote') this.remote = true
+    this.event('playbackmodechange', { mode })
+  }
+
+  setDrmType(type: string): void {
+    if (type) this.drmType = type
+  }
+
+  setPage(page: PageInfo): void {
+    this.page = page
+  }
+
+  /** The first view on a page: from the page's request to the player's start (web). */
+  pageLoad(ms: number): void {
+    if (this.metrics.page_load_ms === null && Number.isFinite(ms)) this.metrics.page_load_ms = Math.max(0, Math.round(ms))
+  }
+
+  /** Captions shown at some point of the view. */
+  captions(on: boolean): void {
+    if (on && !this.captionsOn) { this.captionsOn = true; this.event('captions', { on }) }
+  }
+
+  private cdnFrom(request: RequestInfo): void {
+    for (const [name, read] of POP_HEADERS) {
+      const value = header(request.headers, name).trim()
+      if (value) { this.edgePop = read(value).slice(0, 64); break }
+    }
+    // An app-set CDN wins; otherwise the latest X-CDN header names it.
+    const name = header(request.headers, 'x-cdn').trim().slice(0, 64)
+    if (!name || this.video.cdn || name === this.cdn) return
+    this.cdn = name
+    this.event('cdnchange', { cdn: name })
   }
 
   /** How long the player took from getting the source to being able to start (the monitor measures it). */
@@ -126,7 +346,10 @@ export class ViewTracker {
     if (this.ended || this.state === 'ad') return
     if (!this.firstFrame) {
       this.firstFrame = true
-      this.metrics.video_startup_ms = Math.round(this.now() - (this.playRequestedAt ?? this.t0) - this.startupAdMs)
+      const since = this.now() - (this.playRequestedAt ?? this.t0)
+      // Video startup ends at the first frame of a pre-roll, if one came first; content startup leaves ads out.
+      this.metrics.video_startup_ms ??= Math.round(since)
+      this.metrics.content_startup_ms = Math.round(since - this.startupAdMs)
     }
     if (this.state === 'rebuffering') this.event('rebufferend')
     if (this.state !== 'playing') this.event('playing')
@@ -167,11 +390,18 @@ export class ViewTracker {
     if (paused) this.move('paused')
   }
 
-  rendition(kbps: number | null, width: number | null, height: number | null): void {
+  rendition(kbps: number | null, width: number | null, height: number | null, details?: RenditionDetails): void {
     if (this.state === 'ad') return // an ad's own rendition, in players that play ads themselves
+    if (details) this.details = { ...this.details, ...Object.fromEntries(Object.entries(details).filter(([, value]) => value)) }
     if (kbps === this.kbps && width === this.videoWidth && height === this.videoHeight) return
     this.account()
-    if (this.firstFrame) this.metrics.rendition_changes += 1
+    this.initial ??= kbps !== null || width !== null ? { kbps, width, height } : null
+    if (this.firstFrame) {
+      this.metrics.rendition_changes += 1
+      // Up or down by bitrate, or by size where the player tells no bitrate.
+      const [before, after] = kbps !== null && this.kbps !== null ? [this.kbps, kbps] : [this.videoHeight, height]
+      if (before !== null && after !== null && after !== before) this.metrics[after > before ? 'rendition_upshifts' : 'rendition_downshifts'] += 1
+    }
     this.kbps = kbps
     this.videoWidth = width
     this.videoHeight = height
@@ -199,11 +429,15 @@ export class ViewTracker {
     if (Number.isFinite(ms)) this.metrics.live_latency_ms = Math.max(0, Math.round(ms))
   }
 
-  failed(code: string, message: string, fatal = true): void {
+  /**
+   * An error. fatal: it stopped playback. businessException: your own rule stopped it (geo-block,
+   * paywall, too many streams): no playback failure.
+   */
+  failed(code: string, message: string, fatal = true, businessException = false): void {
     if (this.ended) return
-    this.event('error', { code, message, fatal })
+    this.event('error', businessException ? { code, message, fatal, business_exception: true } : { code, message, fatal })
     if (!fatal) return
-    this.error = { code, message, fatal }
+    this.error = { code, message, fatal, business_exception: businessException }
     this.end()
   }
 
@@ -237,10 +471,34 @@ export class ViewTracker {
     this.move('ad')
   }
 
+  /** An ad request went out (VAST/VMAP). Before the first pre-roll plays, its time is pre-roll request time. */
+  adRequest(): void {
+    if (this.ended) return
+    if (!this.firstFrame && this.metrics.ad_startup_ms === null) {
+      this.metrics.preroll_requests += 1
+      this.adRequestAt ??= this.now()
+    }
+    this.event('adrequest')
+  }
+
+  /** The ad response came back and was read. */
+  adResponse(): void {
+    if (this.ended) return
+    const now = this.now()
+    if (this.adRequestAt !== null && this.playRequestedAt !== null && this.metrics.ad_startup_ms === null) {
+      // Only time after playback was asked for counts.
+      this.metrics.preroll_request_ms = Math.round((this.metrics.preroll_request_ms ?? 0) + now - Math.max(this.adRequestAt, this.playRequestedAt))
+    }
+    this.adRequestAt = null
+    this.adResponseAt = now
+    this.event('adresponse')
+  }
+
   /** An ad was asked to play. */
   adStart(): void {
     if (this.ended) return
     if (this.state !== 'ad') this.adBreakStart()
+    if (!this.firstFrame && this.prerollAt === null) this.prerollAt = this.now()
     this.metrics.ad_count += 1
     this.event('adplay')
   }
@@ -248,7 +506,15 @@ export class ViewTracker {
   /** The ad's frames are moving. */
   adPlaying(): void {
     if (this.state !== 'ad' || this.adPlayingSince !== null) return
-    this.adPlayingSince = this.now()
+    const now = this.now()
+    this.adPlayingSince = now
+    if (!this.firstFrame && this.metrics.ad_startup_ms === null) {
+      const asked = this.prerollAt ?? this.adBreakAt
+      this.metrics.ad_startup_ms = Math.round(now - asked)
+      // Loading the ad: from the last ad response (or the ad's start), never before playback was asked for.
+      this.metrics.preroll_load_ms = Math.round(now - Math.max(this.adResponseAt ?? asked, this.playRequestedAt ?? -Infinity))
+      this.metrics.video_startup_ms = Math.round(now - (this.playRequestedAt ?? this.t0))
+    }
     this.event('adplaying')
   }
 
@@ -304,14 +570,31 @@ export class ViewTracker {
         id: this.video.id, title: this.video.title, series_id: this.video.seriesId, series_title: this.video.seriesTitle,
         duration_ms: this.video.durationMs, stream_type: this.video.streamType ?? 'on-demand',
         source_type: this.video.sourceType, source_host: this.video.sourceHost,
+        cdn: this.cdn || undefined, drm_type: this.drmType || undefined,
+        content_type: this.video.contentType, language_code: this.video.languageCode,
+        variant_name: this.video.variantName, variant_id: this.video.variantId, encoding_variant: this.video.encodingVariant,
+        affiliate: this.video.affiliate, brand: this.video.brand, producer: this.video.producer, creator_id: this.video.creatorId,
+        drm_level: this.video.drmLevel, cdn_edge_pop: this.edgePop || undefined,
       },
       player: {
         name: this.player.name, version: this.player.version, autoplay: Boolean(this.player.autoplay),
-        width: this.playerWidth, height: this.playerHeight,
+        width: this.playerWidth, height: this.playerHeight, fullscreen: this.fullscreen, pip: this.pip, captions: this.captionsOn,
+        software: this.player.software, software_version: this.player.softwareVersion, instance_id: this.player.instanceId,
+        language: this.player.language, poster: this.player.poster, preload: Boolean(this.player.preload),
+        remote_played: this.remote, time_shift: Boolean(this.player.timeShift),
       },
+      rendition: {
+        video_codec: this.details.videoCodec, audio_codec: this.details.audioCodec, framerate: this.details.framerate,
+        dynamic_range: this.details.dynamicRange, initial_bitrate_kbps: this.initial?.kbps ?? undefined,
+        initial_width: this.initial?.width ?? undefined, initial_height: this.initial?.height ?? undefined,
+      },
+      ...(this.video.experimentName ? { experiment_name: this.video.experimentName } : {}),
+      ...(this.video.subPropertyId ? { sub_property_id: this.video.subPropertyId } : {}),
+      ...(this.page ? { page: this.page } : {}),
+      ...(this.video.viewSessionId ? { view_session_id: this.video.viewSessionId } : {}),
       // Times add up in fractions of a millisecond; the beacon carries whole ones.
       metrics: Object.fromEntries(Object.entries(this.metrics).map(([key, value]) =>
-        [key, typeof value === 'number' && key !== 'max_upscale_pct' ? Math.round(value) : value])),
+        [key, typeof value === 'number' && key !== 'max_upscale_pct' && key !== 'max_downscale_pct' ? Math.round(value) : value])),
       custom: Object.fromEntries(Object.entries(this.video.custom ?? {}).filter(([, value]) => value)) as Record<string, string>,
       error: this.error,
       events: this.events.slice(0, maxEvents),
@@ -355,11 +638,34 @@ export class ViewTracker {
       this.bitratePlayingMs += ms
     }
     if (this.videoWidth && this.videoHeight && this.playerWidth && this.playerHeight) {
+      // How much the dimension that fills the player first is stretched (320 → 640: 100 %) or shrunk.
       const scale = Math.min(this.playerWidth / this.videoWidth, this.playerHeight / this.videoHeight)
       if (scale > 1) {
+        const pct = Math.round((scale - 1) * 1000) / 10
         m.upscale_ms += ms
-        m.max_upscale_pct = Math.max(m.max_upscale_pct, Math.round((scale - 1) * 1000) / 10)
-      } else if (scale < 1) m.downscale_ms += ms
+        m.upscale_pct_ms += pct * ms
+        m.max_upscale_pct = Math.max(m.max_upscale_pct, pct)
+      } else if (scale < 1) {
+        const pct = Math.round((1 / scale - 1) * 1000) / 10
+        m.downscale_ms += ms
+        m.downscale_pct_ms += pct * ms
+        m.max_downscale_pct = Math.max(m.max_downscale_pct, pct)
+      }
     }
   }
+}
+
+/** widevine, playready, fairplay or clearkey from a key system name or HLS key format ('' when unknown). */
+export function drmTypeOf(keySystem: string | null | undefined): string {
+  const name = (keySystem ?? '').toLowerCase()
+  if (name.includes('widevine') || name.includes('edef8ba9')) return 'widevine'
+  if (name.includes('playready') || name.includes('9a04f079')) return 'playready'
+  if (name.includes('fairplay') || name.includes('apple.fps') || name.includes('streamingkeydelivery') || name.includes('94ce86fb')) return 'fairplay'
+  if (name.includes('clearkey') || name.includes('e2719d58') || name.includes('1077efec')) return 'clearkey'
+  return ''
+}
+
+/** The host part of a URL ('' when it is not one). */
+export function hostnameOf(url: string | null | undefined): string {
+  try { return url ? new URL(url, typeof location === 'undefined' ? undefined : location.href).hostname : '' } catch { return '' }
 }

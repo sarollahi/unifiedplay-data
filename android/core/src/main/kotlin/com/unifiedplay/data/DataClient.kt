@@ -15,7 +15,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 const val SDK_NAME = "unifiedplay-data-android"
-const val SDK_VERSION = "1.0.0"
+const val SDK_VERSION = "1.1.0"
 const val DEFAULT_API_BASE = "https://backend.unifiedplay.com"
 private const val BEACON_PATH = "/api/v1/data/beacons"
 private const val PREFS = "unifiedplay-data"
@@ -29,6 +29,11 @@ data class DataConfig(
     val key: String,
     /** Where beacons go. Defaults to UnifiedPlay. */
     val apiBase: String = DEFAULT_API_BASE,
+    /**
+     * Your own beacon host (data.example.com), set up in the Console's Video data page: beacons go
+     * to https://{beaconDomain}, which blockers of other sites' hosts let through. Wins over apiBase.
+     */
+    val beaconDomain: String? = null,
     /** Defaults to the app's versionName. */
     val appVersion: String = "",
     /**
@@ -36,6 +41,10 @@ data class DataConfig(
      * (UnifiedPlay's own apps send the viewer's usr_ id, kept only with analytics consent.)
      */
     val userId: String? = null,
+    /** Your own words for the viewer's plan, for breakdowns: plan ("premium"), its status ("trialing"), its category ("sports"). */
+    val viewerPlan: String? = null,
+    val viewerPlanStatus: String? = null,
+    val viewerPlanCategory: String? = null,
     val intervalMs: Long = 10_000,
 )
 
@@ -76,6 +85,11 @@ class DataClient internal constructor(
 
     fun setUserId(userId: String?) {
         config = config.copy(userId = userId)
+    }
+
+    /** The viewer's plan changed (signed in, subscribed): the next beacons carry it. */
+    fun setViewerPlan(plan: String?, status: String? = null, category: String? = null) {
+        config = config.copy(viewerPlan = plan, viewerPlanStatus = status, viewerPlanCategory = category)
     }
 
     fun add(view: ViewTracker) {
@@ -120,12 +134,17 @@ class DataClient internal constructor(
             mapOf(
                 "sdk" to mapOf("name" to SDK_NAME, "version" to SDK_VERSION),
                 "session_id" to sessionId,
-                "viewer" to mapOf("device_id" to deviceId, "user_id" to (config.userId ?: "")),
+                "viewer" to mapOf(
+                    "device_id" to deviceId, "user_id" to (config.userId ?: ""),
+                    "plan" to config.viewerPlan, "plan_status" to config.viewerPlanStatus, "plan_category" to config.viewerPlanCategory,
+                ),
                 "device" to device,
                 "views" to snapshots,
             ),
         ).toString()
-        val url = config.apiBase.trimEnd('/') + BEACON_PATH
+        val base = config.beaconDomain?.takeIf { it.isNotBlank() }
+            ?.let { "https://" + it.removePrefix("https://").removePrefix("http://").substringBefore('/') } ?: config.apiBase
+        val url = base.trimEnd('/') + BEACON_PATH
         val key = config.key
         io.execute {
             val result = runCatching { send(url, key, body) }.getOrNull()
@@ -184,7 +203,13 @@ private fun androidDevice(context: Context, appVersion: String): Map<String, Str
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty() }.getOrDefault("")
     }
     val tv = context.packageManager.hasSystemFeature("android.software.leanback")
+    val category = when {
+        tv -> "tv"
+        context.resources.configuration.smallestScreenWidthDp >= 600 -> "tablet"
+        else -> "phone"
+    }
     return mapOf(
+        "category" to category,
         "os" to if (tv) "Android TV" else "Android",
         "os_version" to Build.VERSION.RELEASE.orEmpty(),
         "manufacturer" to Build.MANUFACTURER.orEmpty(),

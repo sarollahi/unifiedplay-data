@@ -15,6 +15,15 @@ public protocol AdTarget: AnyObject {
     func adError(code: String, message: String)
     /// The ads gave the video back.
     func adBreakEnd()
+    /// An ad request went out (VAST/VMAP): before the first pre-roll, its time is pre-roll request time.
+    func adRequest()
+    /// The ad response came back and was read.
+    func adResponse()
+}
+
+public extension AdTarget {
+    func adRequest() {}
+    func adResponse() {}
 }
 
 /// What every player monitor shares: a view starts when playback of a source is asked for (so a
@@ -25,10 +34,17 @@ open class PlayerMonitor: AdTarget {
     public let client: DataClient
     private let info: PlayerInfo
     public private(set) var view: ViewTracker?
+    private let instanceID = UUID().uuidString.lowercased()
     private var sourceAt: Double?
     private var readyAt: Double?
     private var width = 0
     private var height = 0
+    // Requests before a view exists (the manifest, a preload) go into it when it starts.
+    private enum RequestKind { case completed, failed, canceled }
+    private var early: [(RequestKind, RequestInfo)] = []
+    private var drmType = ""
+    private var mode = "standard"
+    private var captionsOn = false
 
     public init(client: DataClient, player: PlayerInfo) {
         self.client = client
@@ -62,6 +78,8 @@ open class PlayerMonitor: AdTarget {
         view = nil
         sourceAt = hasSource ? Self.now() : nil
         readyAt = nil
+        early = []
+        drmType = ""
     }
 
     /// The player could start: player startup is done.
@@ -79,11 +97,18 @@ open class PlayerMonitor: AdTarget {
         guard let video = describe() else { return nil }
         var player = info
         player.autoplay = autoplay()
+        player.instanceID = player.instanceID ?? instanceID
+        player.language = player.language ?? Locale.preferredLanguages.first
         let next = ViewTracker(video: video, player: player)
         view = next
         client.add(next)
         next.playerSize(width: width, height: height)
         if let sourceAt, let readyAt { next.playerStartup(readyAt - sourceAt) }
+        if !drmType.isEmpty { next.setDrmType(drmType) }
+        if mode != "standard" { next.playbackMode(mode) }
+        if captionsOn { next.captions(true) }
+        for (kind, request) in early { record(next, kind, request) }
+        early = []
         onNewView(next)
         client.flush()
         return next
@@ -94,6 +119,50 @@ open class PlayerMonitor: AdTarget {
         self.width = width
         self.height = height
         view?.playerSize(width: width, height: height)
+    }
+
+    /// Content requests came back (the monitors report their player's loads by themselves).
+    public func requestCompleted(_ request: RequestInfo) { report(.completed, request) }
+    public func requestFailed(_ request: RequestInfo) { report(.failed, request) }
+    public func requestCanceled(_ request: RequestInfo) { report(.canceled, request) }
+
+    /// The DRM in use (widevine, playready, fairplay, clearkey).
+    public func setDrmType(_ type: String) {
+        drmType = type
+        view?.setDrmType(type)
+    }
+
+    /// Captions turned on or off.
+    public func captions(_ on: Bool) {
+        captionsOn = captionsOn || on
+        view?.captions(on)
+    }
+
+    /// Your own rule stopped playback (geo-block, paywall, too many streams): the view ends without failing.
+    public func businessException(code: String, message: String = "") {
+        current()?.failed(code: code, message: message, fatal: true, businessException: true)
+        client.flush()
+    }
+
+    public func adRequest() { current()?.adRequest() }
+    public func adResponse() { view?.adResponse() }
+
+    /// The app's player went fullscreen ("fullscreen"), picture-in-picture ("pip") or back ("standard").
+    public func playbackMode(_ next: String) {
+        mode = next
+        view?.playbackMode(next)
+    }
+
+    private func report(_ kind: RequestKind, _ request: RequestInfo) {
+        if let view, !view.ended { record(view, kind, request) } else if early.count < 50 { early.append((kind, request)) }
+    }
+
+    private func record(_ view: ViewTracker, _ kind: RequestKind, _ request: RequestInfo) {
+        switch kind {
+        case .completed: view.requestCompleted(request)
+        case .failed: view.requestFailed(request)
+        case .canceled: view.requestCanceled(request)
+        }
     }
 
     public func adBreakStart() {

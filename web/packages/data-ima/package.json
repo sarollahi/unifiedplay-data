@@ -1,6 +1,6 @@
 {
   "name": "@unifiedplay/data-ima",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "UnifiedPlay Data for Google IMA ads (IMA HTML5 SDK)",
   "type": "module",
   "main": "dist/index.js",
@@ -26,6 +26,6 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@unifiedplay/data": "^1.0.0"
+    "@unifiedplay/data": "^1.1.0"
   }
 }

@@ -7,6 +7,31 @@ final class ViewTrackerTests: XCTestCase {
     private func metrics(_ snapshot: [String: Any]) -> [String: Any] { snapshot["metrics"] as! [String: Any] }
     private func types(_ snapshot: [String: Any]) -> [String] { (snapshot["events"] as! [[String: Any]]).map { $0["type"] as! String } }
 
+    func testCountsShiftsAndKeepsTheFirstRenditionCodecsEdgeAndRemotePlay() {
+        let view = ViewTracker(video: VideoInfo(id: "ep_1", brand: "Drama+", creatorID: "studio-9"),
+                               player: PlayerInfo(name: "main", software: "AVPlayer", language: "sv")) { [unowned self] in time }
+        view.rendition(kbps: 1500, width: 1280, height: 720, details: RenditionDetails(videoCodec: "hvc1"))
+        view.play(); time += 500; view.playing()
+        view.rendition(kbps: 3000, width: 1920, height: 1080, details: RenditionDetails(framerate: 25, dynamicRange: "HDR"))
+        view.rendition(kbps: 800, width: 960, height: 540)
+        view.requestCompleted(RequestInfo(type: "video", headers: ["X-Served-By": "cache-arn1234-ARN"]))
+        view.playbackMode("remote")
+        let snapshot = view.snapshot()
+        XCTAssertEqual(metrics(snapshot)["rendition_upshifts"] as? Int, 1)
+        XCTAssertEqual(metrics(snapshot)["rendition_downshifts"] as? Int, 1)
+        let rendition = snapshot["rendition"] as! [String: Any]
+        XCTAssertEqual(rendition["video_codec"] as? String, "hvc1")
+        XCTAssertEqual(rendition["dynamic_range"] as? String, "HDR")
+        XCTAssertEqual(rendition["initial_bitrate_kbps"] as? Int, 1500)
+        XCTAssertEqual(rendition["initial_height"] as? Int, 720)
+        let video = snapshot["video"] as! [String: Any]
+        XCTAssertEqual(video["brand"] as? String, "Drama+")
+        XCTAssertEqual(video["cdn_edge_pop"] as? String, "ARN")
+        let player = snapshot["player"] as! [String: Any]
+        XCTAssertEqual(player["software"] as? String, "AVPlayer")
+        XCTAssertEqual(player["remote_played"] as? Bool, true)
+    }
+
     func testSplitsTimeIntoStartupPlayingRebufferingAndSeeking() {
         let view = tracker()
         view.playerStartup(100)
@@ -25,6 +50,92 @@ final class ViewTrackerTests: XCTestCase {
         XCTAssertEqual(m["playing_ms"] as? Int, 10_000)
         XCTAssertEqual(m["watch_ms"] as? Int, 800 + 10_000 + 1200 + 500)
         XCTAssertEqual(types(snapshot), ["viewstart", "play", "playing", "rebufferstart", "rebufferend", "playing", "seeking", "seeked", "playing", "pause"])
+    }
+
+    func testTimesPreRollRequestsLoadingAndStartupAfterThePlayRequest() {
+        let view = ViewTracker(video: VideoInfo(id: "v", contentType: "episode", experimentName: "ladder-b", custom: [10: "tenth"]),
+                               player: PlayerInfo(name: "test")) { [unowned self] in time }
+        view.adRequest()
+        time += 300; view.play()
+        time += 200; view.adResponse()
+        time += 100; view.adRequest(); time += 150; view.adResponse()
+        time += 50; view.adBreakStart(); view.adStart()
+        time += 400; view.adPlaying()
+        time += 10_000; view.adEnd(); view.adBreakEnd()
+        time += 700; view.playing()
+        let snapshot = view.snapshot()
+        let m = metrics(snapshot)
+        XCTAssertEqual(m["preroll_requests"] as? Int, 2)
+        XCTAssertEqual(m["preroll_request_ms"] as? Int, 350)
+        XCTAssertEqual(m["ad_startup_ms"] as? Int, 400)
+        XCTAssertEqual(m["preroll_load_ms"] as? Int, 450)
+        XCTAssertEqual(m["video_startup_ms"] as? Int, 900)
+        XCTAssertEqual(m["content_startup_ms"] as? Int, 1200)
+        XCTAssertEqual(snapshot["experiment_name"] as? String, "ladder-b")
+        XCTAssertEqual((snapshot["video"] as! [String: Any])["content_type"] as? String, "episode")
+        XCTAssertEqual(snapshot["custom"] as? [String: String], ["10": "tenth"])
+    }
+
+    func testWeighsScalingAmountsByTimeAndKeepsBusinessExceptionsApart() {
+        let view = tracker()
+        view.playerSize(width: 1280, height: 720)
+        view.rendition(kbps: 800, width: 640, height: 360)
+        view.play(); view.playing()
+        time += 1000
+        view.rendition(kbps: 4000, width: 2560, height: 1440)
+        time += 3000
+        view.captions(true)
+        view.failed(code: "geo", message: "Not in your country", fatal: true, businessException: true)
+        let snapshot = view.snapshot()
+        let m = metrics(snapshot)
+        XCTAssertEqual(m["upscale_pct_ms"] as? Int, 100_000)
+        XCTAssertEqual(m["downscale_pct_ms"] as? Int, 300_000)
+        XCTAssertEqual(m["max_downscale_pct"] as? Double, 100)
+        XCTAssertEqual((snapshot["error"] as! [String: Any])["business_exception"] as? Bool, true)
+        XCTAssertEqual((snapshot["player"] as! [String: Any])["captions"] as? Bool, true)
+    }
+
+    func testAddsUpRequestsCountsFailuresByTypeAndNamesTheCDN() {
+        let view = ViewTracker(video: VideoInfo(id: "ep_1", viewSessionID: "cmcd-1"), player: PlayerInfo(name: "test")) { [unowned self] in time }
+        view.requestCompleted(RequestInfo(type: "manifest", start: 0, responseStart: 50, responseEnd: 80, bytes: 2_000, headers: ["X-CDN": "fastly"]))
+        view.requestCompleted(RequestInfo(type: "video", start: 100, responseStart: 140, responseEnd: 1100, bytes: 1_250_000))
+        view.requestCompleted(RequestInfo(type: "audio", start: 100, responseStart: 160, responseEnd: 600, bytes: 125_000, headers: ["x-cdn": "cloudflare"]))
+        view.requestCompleted(RequestInfo(type: "video_init", start: 0, responseEnd: 10, bytes: 900))
+        view.requestCompleted(RequestInfo(type: "media", start: 0, responseEnd: 2000, bytes: 500_000, count: 4)) // an access log batch
+        view.requestFailed(RequestInfo(type: "video", hostname: "cdn.example.com", error: "CoreMediaErrorDomain", errorCode: 503))
+        view.requestFailed(RequestInfo(type: "encryption", errorCode: 403))
+        view.requestCanceled(RequestInfo(type: "audio"))
+        view.playbackMode("pip"); view.playbackMode("pip"); view.playbackMode("standard")
+        view.setDrmType("fairplay")
+        let snapshot = view.snapshot()
+        let m = metrics(snapshot)
+        XCTAssertEqual(m["request_completed"] as? Int, 8)
+        XCTAssertEqual(m["request_failed"] as? Int, 2)
+        XCTAssertEqual(m["request_canceled"] as? Int, 1)
+        XCTAssertEqual(m["request_failed_media"] as? Int, 1)
+        XCTAssertEqual(m["request_failed_encryption"] as? Int, 1)
+        XCTAssertEqual(m["request_media_completed"] as? Int, 6)
+        XCTAssertEqual(m["request_media_bytes"] as? Int, 1_875_000)
+        XCTAssertEqual(m["request_media_ms"] as? Int, 3500)
+        XCTAssertEqual(m["request_media_ttfb_ms"] as? Int, 100)
+        XCTAssertEqual(m["request_media_ttfb_count"] as? Int, 2)
+        XCTAssertEqual(m["request_media_max_ttfb_ms"] as? Int, 60)
+        let video = snapshot["video"] as! [String: Any]
+        XCTAssertEqual(video["cdn"] as? String, "cloudflare")
+        XCTAssertEqual(video["drm_type"] as? String, "fairplay")
+        let player = snapshot["player"] as! [String: Any]
+        XCTAssertEqual(player["pip"] as? Bool, true)
+        XCTAssertEqual(player["fullscreen"] as? Bool, false)
+        XCTAssertEqual(snapshot["view_session_id"] as? String, "cmcd-1")
+        XCTAssertEqual(types(snapshot).filter { $0 == "cdnchange" }.count, 2)
+        XCTAssertEqual(types(snapshot).filter { $0 == "playbackmodechange" }.count, 2)
+        XCTAssertEqual(drmTypeOf("com.apple.streamingkeydelivery"), "fairplay")
+    }
+
+    @MainActor
+    func testSendsToTheBeaconDomain() {
+        XCTAssertEqual(DataClient.base(DataConfig(key: "k", beaconDomain: "https://data.example.com/x")).absoluteString, "https://data.example.com")
+        XCTAssertEqual(DataClient.base(DataConfig(key: "k")).absoluteString, defaultAPIBase.absoluteString)
     }
 
     func testCountsAStallBeforeTheFirstFrameAsStartup() {
@@ -59,7 +170,8 @@ final class ViewTrackerTests: XCTestCase {
         time += 5_000; view.adEnd(); view.adBreakEnd(); time += 100; view.playing(); time += 1_000
         let snapshot = view.snapshot()
         let m = metrics(snapshot)
-        XCTAssertEqual(m["video_startup_ms"] as? Int, 500)
+        XCTAssertEqual(m["video_startup_ms"] as? Int, 0) // ends at the pre-roll's first frame
+        XCTAssertEqual(m["content_startup_ms"] as? Int, 500)
         XCTAssertEqual(m["ad_break_count"] as? Int, 2)
         XCTAssertEqual(m["ad_count"] as? Int, 3)
         XCTAssertEqual(m["ad_error_count"] as? Int, 1)

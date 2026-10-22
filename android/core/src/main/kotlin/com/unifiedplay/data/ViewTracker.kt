@@ -19,11 +19,108 @@ data class VideoInfo(
     val streamType: String = "on-demand",
     val sourceType: String? = null,
     val sourceHost: String? = null,
-    /** Up to five of your own dimensions (1..5: an experiment, a page type…); the Console breaks views down by them. */
+    /** The CDN serving the video, when you know it; otherwise the X-CDN response header names it. */
+    val cdn: String? = null,
+    /** widevine, playready, fairplay or clearkey, when the player cannot tell. */
+    val drmType: String? = null,
+    /** Your own id for this view, to join it with CDN logs: give your player's CMCD session id the same value. */
+    val viewSessionId: String? = null,
+    /** episode, movie, trailer, clip, live… */
+    val contentType: String? = null,
+    /** The audio language, e.g. en, sv. */
+    val languageCode: String? = null,
+    /** Which variant of the video (a cut, a dub). */
+    val variantName: String? = null,
+    /** Which encoding ladder or settings, for comparing encodings. */
+    val encodingVariant: String? = null,
+    /** An A/B test this view is in. */
+    val experimentName: String? = null,
+    /** A part of your service (a site, a customer, a channel). */
+    val subPropertyId: String? = null,
+    /** Up to ten of your own dimensions (1..10); the Console breaks views down by them. */
     val custom: Map<Int, String> = emptyMap(),
+    /** Who distributes or sells the video (a partner channel). */
+    val affiliate: String? = null,
+    /** The brand the video is under. */
+    val brand: String? = null,
+    val producer: String? = null,
+    /** The creator's id, for services with many creators. */
+    val creatorId: String? = null,
+    /** Your id for the variant (see variantName). */
+    val variantId: String? = null,
+    /** Widevine L1 / L3…, when the monitor cannot tell. */
+    val drmLevel: String? = null,
 )
 
-data class PlayerInfo(val name: String, val version: String? = null, val autoplay: Boolean = false)
+/** What the playing rendition is, where the player tells. */
+data class RenditionDetails(
+    val videoCodec: String? = null,
+    val audioCodec: String? = null,
+    val framerate: Double? = null,
+    /** SDR, HDR10, HLG, Dolby Vision… */
+    val dynamicRange: String? = null,
+)
+
+// Response headers that name the CDN edge (point of presence) that served a request.
+private val POP_HEADERS: List<Pair<String, (String) -> String>> = listOf(
+    "x-amz-cf-pop" to { value -> value },
+    "x-served-by" to { value -> value.split(',').last().trim().split('-').last() },
+    "cf-ray" to { value -> value.split('-').last() },
+    "x-edge-location" to { value -> value },
+    "x-cdn-pop" to { value -> value },
+)
+
+/**
+ * One network request for the content (spec: Requests). type: manifest, video, audio, video_init,
+ * audio_init, media, subtitle or encryption. Times are milliseconds on any one clock.
+ */
+data class RequestInfo(
+    val type: String? = null,
+    val hostname: String? = null,
+    val start: Long? = null,
+    /** When the first byte arrived, if the player tells. */
+    val responseStart: Long? = null,
+    val responseEnd: Long? = null,
+    val bytes: Long? = null,
+    /** Response headers: X-CDN names the CDN. */
+    val headers: Map<String, List<String>> = emptyMap(),
+    val error: String? = null,
+    val errorCode: Int? = null,
+    val errorText: String? = null,
+)
+
+private val MEDIA_REQUESTS = setOf("video", "audio", "media")
+private val FAILED_MEDIA = setOf("video", "audio", "media", "video_init", "audio_init")
+
+/** widevine, playready, fairplay or clearkey from a key system name or scheme UUID ("" when unknown). */
+fun drmTypeOf(keySystem: String?): String {
+    val name = keySystem.orEmpty().lowercase()
+    return when {
+        "widevine" in name || "edef8ba9" in name -> "widevine"
+        "playready" in name || "9a04f079" in name -> "playready"
+        "fairplay" in name || "apple.fps" in name || "streamingkeydelivery" in name || "94ce86fb" in name -> "fairplay"
+        "clearkey" in name || "e2719d58" in name || "1077efec" in name -> "clearkey"
+        else -> ""
+    }
+}
+
+data class PlayerInfo(
+    /** Your name for this player ("main", "tv-player"); the Console groups views by it. */
+    val name: String,
+    val version: String? = null,
+    val autoplay: Boolean = false,
+    /** The player library and its version (Media3, ExoPlayer…); the monitors fill these. */
+    val software: String? = null,
+    val softwareVersion: String? = null,
+    /** One id per player, made by the monitor. */
+    val instanceId: String? = null,
+    /** The viewer's language, by default the device's. */
+    val language: String? = null,
+    /** The player loads the video before play is asked for. */
+    val preload: Boolean = false,
+    /** A live stream the viewer can pause and rewind (DVR window). */
+    val timeShift: Boolean = false,
+)
 
 /**
  * One view: what happened since playback of one video was asked for, and the totals the beacon
@@ -61,6 +158,26 @@ class ViewTracker(
     private var adBreakAt = 0L
     private var startupAdMs = 0L
     private var adPlayingSince: Long? = null
+    private var cdn: String = video.cdn.orEmpty()
+    private var drmType: String = video.drmType.orEmpty()
+    private var fullscreen = false
+    private var pip = false
+    private var mode = "standard"
+    private var captionsOn = false
+    // Pre-roll (spec: Startup): when it was asked to play, the open ad request, the last ad response.
+    private var prerollAt: Long? = null
+    private var adRequestAt: Long? = null
+    private var adResponseAt: Long? = null
+    private var details = RenditionDetails()
+    private var initialKbps: Double? = null
+    private var initialWidth: Int? = null
+    private var initialHeight: Int? = null
+    private var initialSet = false
+    private var remote = false
+    private var edgePop = ""
+    private var upshifts = 0
+    private var downshifts = 0
+    private var drmLevel = ""
     var ended = false
         private set
 
@@ -85,9 +202,141 @@ class ViewTracker(
     private var adCount = 0
     private var adWatchMs = 0L
     private var adErrorCount = 0
+    private var requestCompleted = 0
+    private var requestFailed = 0
+    private var requestCanceled = 0
+    private var requestFailedManifest = 0
+    private var requestFailedMedia = 0
+    private var requestFailedEncryption = 0
+    private var requestMediaCompleted = 0
+    private var requestMediaBytes = 0L
+    private var requestMediaMs = 0L
+    private var requestMediaTtfbMs = 0L
+    private var requestMediaTtfbCount = 0
+    private var requestMediaMaxTtfbMs = 0L
+    private var contentStartupMs: Long? = null
+    private var adStartupMs: Long? = null
+    private var prerollRequestMs: Long? = null
+    private var prerollLoadMs: Long? = null
+    private var prerollRequests = 0
+    private var upscalePctMs = 0.0
+    private var downscalePctMs = 0.0
+    private var maxDownscalePct = 0.0
 
     init {
         event("viewstart")
+    }
+
+    /** A content request came back. Media segments add to the throughput and latency totals. */
+    fun requestCompleted(request: RequestInfo) {
+        if (ended) return
+        requestCompleted += 1
+        cdnFrom(request)
+        if ((request.type ?: "media") !in MEDIA_REQUESTS) return
+        requestMediaCompleted += 1
+        requestMediaBytes += max(0, request.bytes ?: 0)
+        val start = request.start ?: return
+        request.responseEnd?.let { requestMediaMs += max(0, it - start) }
+        request.responseStart?.let {
+            val ttfb = max(0, it - start)
+            requestMediaTtfbMs += ttfb
+            requestMediaTtfbCount += 1
+            requestMediaMaxTtfbMs = max(requestMediaMaxTtfbMs, ttfb)
+        }
+    }
+
+    fun requestFailed(request: RequestInfo) {
+        if (ended) return
+        requestFailed += 1
+        when (request.type) {
+            "manifest" -> requestFailedManifest += 1
+            "encryption" -> requestFailedEncryption += 1
+            in FAILED_MEDIA -> requestFailedMedia += 1
+        }
+        cdnFrom(request)
+        event("requestfailed", mapOf("type" to request.type, "hostname" to request.hostname, "error" to request.error,
+            "code" to request.errorCode, "text" to request.errorText))
+    }
+
+    fun requestCanceled(request: RequestInfo) {
+        if (ended) return
+        requestCanceled += 1
+        event("requestcanceled", mapOf("type" to request.type, "hostname" to request.hostname))
+    }
+
+    /** Captions shown at some point of the view. */
+    fun captions(on: Boolean) {
+        if (on && !captionsOn) {
+            captionsOn = true
+            event("captions", mapOf("on" to true))
+        }
+    }
+
+    /** An ad request went out (VAST/VMAP). Before the first pre-roll plays, its time is pre-roll request time. */
+    fun adRequest() {
+        if (ended) return
+        if (!firstFrame && adStartupMs == null) {
+            prerollRequests += 1
+            if (adRequestAt == null) adRequestAt = now()
+        }
+        event("adrequest")
+    }
+
+    /** The ad response came back and was read. */
+    fun adResponse() {
+        if (ended) return
+        val current = now()
+        val requested = adRequestAt
+        val played = playRequestedAt
+        if (requested != null && played != null && adStartupMs == null) {
+            // Only time after playback was asked for counts.
+            prerollRequestMs = (prerollRequestMs ?: 0) + current - max(requested, played)
+        }
+        adRequestAt = null
+        adResponseAt = current
+        event("adresponse")
+    }
+
+    /** standard, fullscreen, pip, remote (Cast, another screen), or your own name. */
+    fun playbackMode(next: String) {
+        if (next == mode) return
+        mode = next
+        if (next == "fullscreen") fullscreen = true
+        if (next == "pip") pip = true
+        if (next == "remote") remote = true
+        event("playbackmodechange", mapOf("mode" to next))
+    }
+
+    fun setDrmType(type: String) {
+        if (type.isNotEmpty()) drmType = type
+    }
+
+    /** Widevine L1 / L3…: the monitors tell it when the DRM is Widevine. */
+    fun setDrmLevel(level: String) {
+        if (level.isNotEmpty()) drmLevel = level
+    }
+
+    /** Codecs, frame rate or dynamic range of what plays, as the player tells them (any part at a time). */
+    fun renditionDetails(details: RenditionDetails) {
+        this.details = RenditionDetails(
+            details.videoCodec ?: this.details.videoCodec, details.audioCodec ?: this.details.audioCodec,
+            details.framerate ?: this.details.framerate, details.dynamicRange ?: this.details.dynamicRange,
+        )
+    }
+
+    private fun cdnFrom(request: RequestInfo) {
+        for ((header, read) in POP_HEADERS) {
+            val value = request.headers.entries.firstOrNull { it.key.equals(header, ignoreCase = true) }?.value?.firstOrNull()?.trim()
+            if (!value.isNullOrEmpty()) {
+                edgePop = read(value).take(64)
+                break
+            }
+        }
+        // An app-set CDN wins; otherwise the latest X-CDN header names it.
+        val name = request.headers.entries.firstOrNull { it.key.equals("x-cdn", ignoreCase = true) }?.value?.firstOrNull()?.trim()?.take(64)
+        if (name.isNullOrEmpty() || video.cdn != null || name == cdn) return
+        cdn = name
+        event("cdnchange", mapOf("cdn" to name))
     }
 
     /** How long the player took from getting the source to being able to start (the monitor measures it). */
@@ -110,7 +359,10 @@ class ViewTracker(
         if (ended || state == State.AD) return
         if (!firstFrame) {
             firstFrame = true
-            videoStartupMs = now() - (playRequestedAt ?: t0) - startupAdMs
+            val since = now() - (playRequestedAt ?: t0)
+            // Video startup ends at the first frame of a pre-roll, if one came first; content startup leaves ads out.
+            if (videoStartupMs == null) videoStartupMs = since
+            contentStartupMs = since - startupAdMs
         }
         if (state == State.REBUFFERING) event("rebufferend")
         if (state != State.PLAYING) event("playing")
@@ -151,11 +403,24 @@ class ViewTracker(
         if (paused) move(State.PAUSED)
     }
 
-    fun rendition(kbps: Double?, width: Int?, height: Int?) {
+    fun rendition(kbps: Double?, width: Int?, height: Int?, details: RenditionDetails? = null) {
         if (state == State.AD) return // an ad's own rendition, in players that play ads themselves
+        if (details != null) renditionDetails(details)
         if (kbps == this.kbps && width == videoWidth && height == videoHeight) return
         account()
-        if (firstFrame) renditionChanges += 1
+        if (!initialSet && (kbps != null || width != null)) {
+            initialSet = true
+            initialKbps = kbps
+            initialWidth = width
+            initialHeight = height
+        }
+        if (firstFrame) {
+            renditionChanges += 1
+            // Up or down by bitrate, or by size where the player tells no bitrate.
+            val previous = this.kbps
+            val (before, after) = if (kbps != null && previous != null) previous to kbps else videoHeight?.toDouble() to height?.toDouble()
+            if (before != null && after != null && after != before) if (after > before) upshifts += 1 else downshifts += 1
+        }
         this.kbps = kbps
         videoWidth = width
         videoHeight = height
@@ -185,11 +450,16 @@ class ViewTracker(
         liveLatencyMs = max(0, ms)
     }
 
-    fun failed(code: String, message: String, fatal: Boolean = true) {
+    /**
+     * An error. fatal: it stopped playback. businessException: your own rule stopped it (geo-block,
+     * paywall, too many streams): no playback failure.
+     */
+    fun failed(code: String, message: String, fatal: Boolean = true, businessException: Boolean = false) {
         if (ended) return
-        event("error", mapOf("code" to code, "message" to message, "fatal" to fatal))
+        event("error", if (businessException) mapOf("code" to code, "message" to message, "fatal" to fatal, "business_exception" to true)
+            else mapOf("code" to code, "message" to message, "fatal" to fatal))
         if (!fatal) return
-        error = mapOf("code" to code, "message" to message, "fatal" to true)
+        error = mapOf("code" to code, "message" to message, "fatal" to fatal, "business_exception" to businessException)
         end()
     }
 
@@ -227,6 +497,7 @@ class ViewTracker(
     fun adStart() {
         if (ended) return
         if (state != State.AD) adBreakStart()
+        if (!firstFrame && prerollAt == null) prerollAt = now()
         adCount += 1
         event("adplay")
     }
@@ -234,7 +505,15 @@ class ViewTracker(
     /** The ad's frames are moving. */
     fun adPlaying() {
         if (state != State.AD || adPlayingSince != null) return
-        adPlayingSince = now()
+        val current = now()
+        adPlayingSince = current
+        if (!firstFrame && adStartupMs == null) {
+            val asked = prerollAt ?: adBreakAt
+            adStartupMs = current - asked
+            // Loading the ad: from the last ad response (or the ad's start), never before playback was asked for.
+            prerollLoadMs = current - max(adResponseAt ?: asked, playRequestedAt ?: Long.MIN_VALUE)
+            videoStartupMs = current - (playRequestedAt ?: t0)
+        }
         event("adplaying")
     }
 
@@ -287,11 +566,26 @@ class ViewTracker(
                 "id" to video.id, "title" to video.title, "series_id" to video.seriesId, "series_title" to video.seriesTitle,
                 "duration_ms" to video.durationMs, "stream_type" to video.streamType,
                 "source_type" to video.sourceType, "source_host" to video.sourceHost,
+                "cdn" to cdn.ifEmpty { null }, "drm_type" to drmType.ifEmpty { null },
+                "content_type" to video.contentType, "language_code" to video.languageCode,
+                "variant_name" to video.variantName, "variant_id" to video.variantId, "encoding_variant" to video.encodingVariant,
+                "affiliate" to video.affiliate, "brand" to video.brand, "producer" to video.producer, "creator_id" to video.creatorId,
+                "drm_level" to (video.drmLevel ?: drmLevel.ifEmpty { null }), "cdn_edge_pop" to edgePop.ifEmpty { null },
             ),
             "player" to mapOf(
                 "name" to player.name, "version" to player.version, "autoplay" to player.autoplay,
-                "width" to playerWidth, "height" to playerHeight,
+                "width" to playerWidth, "height" to playerHeight, "fullscreen" to fullscreen, "pip" to pip, "captions" to captionsOn,
+                "software" to player.software, "software_version" to player.softwareVersion, "instance_id" to player.instanceId,
+                "language" to player.language, "preload" to player.preload, "remote_played" to remote, "time_shift" to player.timeShift,
             ),
+            "rendition" to mapOf(
+                "video_codec" to details.videoCodec, "audio_codec" to details.audioCodec, "framerate" to details.framerate,
+                "dynamic_range" to details.dynamicRange, "initial_bitrate_kbps" to initialKbps?.roundToLong(),
+                "initial_width" to initialWidth, "initial_height" to initialHeight,
+            ),
+            "view_session_id" to video.viewSessionId,
+            "experiment_name" to video.experimentName,
+            "sub_property_id" to video.subPropertyId,
             "metrics" to mapOf(
                 "player_startup_ms" to playerStartupMs,
                 "video_startup_ms" to videoStartupMs,
@@ -316,6 +610,28 @@ class ViewTracker(
                 "ad_count" to adCount,
                 "ad_watch_ms" to adWatchMs,
                 "ad_error_count" to adErrorCount,
+                "request_completed" to requestCompleted,
+                "request_failed" to requestFailed,
+                "request_canceled" to requestCanceled,
+                "request_failed_manifest" to requestFailedManifest,
+                "request_failed_media" to requestFailedMedia,
+                "request_failed_encryption" to requestFailedEncryption,
+                "request_media_completed" to requestMediaCompleted,
+                "request_media_bytes" to requestMediaBytes,
+                "request_media_ms" to requestMediaMs,
+                "request_media_ttfb_ms" to requestMediaTtfbMs,
+                "request_media_ttfb_count" to requestMediaTtfbCount,
+                "request_media_max_ttfb_ms" to requestMediaMaxTtfbMs,
+                "content_startup_ms" to contentStartupMs,
+                "ad_startup_ms" to adStartupMs,
+                "preroll_request_ms" to prerollRequestMs,
+                "preroll_load_ms" to prerollLoadMs,
+                "preroll_requests" to prerollRequests,
+                "upscale_pct_ms" to upscalePctMs.roundToLong(),
+                "downscale_pct_ms" to downscalePctMs.roundToLong(),
+                "max_downscale_pct" to maxDownscalePct,
+                "rendition_upshifts" to upshifts,
+                "rendition_downshifts" to downshifts,
             ),
             "custom" to video.custom.filterValues { it.isNotEmpty() }.mapKeys { it.key.toString() },
             "error" to error,
@@ -365,11 +681,17 @@ class ViewTracker(
         val ph = playerHeight ?: return
         if (vw == 0 || vh == 0) return
         val scale = min(pw.toDouble() / vw, ph.toDouble() / vh)
+        // How much the dimension that fills the player first is stretched (320 → 640: 100 %) or shrunk.
         if (scale > 1) {
+            val pct = Math.round((scale - 1) * 1000) / 10.0
             upscaleMs += ms
-            maxUpscalePct = max(maxUpscalePct, Math.round((scale - 1) * 1000) / 10.0)
+            upscalePctMs += pct * ms
+            maxUpscalePct = max(maxUpscalePct, pct)
         } else if (scale < 1) {
+            val pct = Math.round((1 / scale - 1) * 1000) / 10.0
             downscaleMs += ms
+            downscalePctMs += pct * ms
+            maxDownscalePct = max(maxDownscalePct, pct)
         }
     }
 }

@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 
 /// Watches an AVPlayer. A view starts when playback of an item is asked for, so a preloaded item
@@ -36,13 +37,15 @@ public final class AVPlayerMonitor: PlayerMonitor {
     private var playerObservations: [NSKeyValueObservation] = []
     private var itemObservations: [NSKeyValueObservation] = []
     private var itemTokens: [NSObjectProtocol] = []
+    // The access log's totals already reported, per log entry (AVPlayer reports requests in batches).
+    private var reported: [Int: (requests: Int, bytes: Int64, seconds: Double)] = [:]
 
     public init(client: DataClient, player: AVPlayer, layer: AVPlayerLayer? = nil,
                 describe: @escaping (AVPlayerItem) -> VideoInfo = { _ in VideoInfo() }) {
         self.player = player
         self.layer = layer
         describeItem = describe
-        super.init(client: client, player: PlayerInfo(name: "avplayer"))
+        super.init(client: client, player: PlayerInfo(name: "avplayer", software: "AVPlayer", softwareVersion: ProcessInfo.processInfo.operatingSystemVersionString))
         playerObservations = [
             player.observe(\.currentItem, options: [.initial, .new]) { [weak self] player, _ in
                 Self.onMain { self?.itemChanged(player.currentItem) }
@@ -53,6 +56,10 @@ public final class AVPlayerMonitor: PlayerMonitor {
             },
             player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
                 Self.onMain { self?.statusChanged(player) }
+            },
+            // AirPlay: the view played on another screen.
+            player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] player, _ in
+                Self.onMain { if player.isExternalPlaybackActive { self?.playbackMode("remote") } }
             },
         ]
         if player.rate != 0 { current()?.play() }
@@ -95,8 +102,14 @@ public final class AVPlayerMonitor: PlayerMonitor {
     private func itemChanged(_ item: AVPlayerItem?) {
         stopItem()
         kbps = nil
+        reported = [:]
         newSource(hasSource: item != nil)
         guard let item else { return }
+        // AVPlayer only plays FairPlay-protected content.
+        let asset = item.asset
+        Task { @MainActor [weak self] in
+            if (try? await asset.load(.hasProtectedContent)) == true { self?.setDrmType("fairplay") }
+        }
         if item.status == .readyToPlay { ready() }
         itemObservations = [
             item.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -127,16 +140,51 @@ public final class AVPlayerMonitor: PlayerMonitor {
             self?.fail(error)
         }
         on(.AVPlayerItemTimeJumped) { [weak self] _ in self?.jumped() }
+        on(AVPlayerItem.mediaSelectionDidChangeNotification) { [weak self] note in
+            guard let item = note.object as? AVPlayerItem else { return }
+            let asset = item.asset
+            Task { @MainActor [weak self] in
+                // Captions: a legible (subtitle or caption) option is selected.
+                guard let group = try? await asset.loadMediaSelectionGroup(for: .legible) else { return }
+                self?.captions(item.currentMediaSelection.selectedMediaOption(in: group) != nil)
+            }
+        }
         on(.AVPlayerItemNewAccessLogEntry) { [weak self] note in
             guard let self, let item = note.object as? AVPlayerItem, let log = item.accessLog() else { return }
             if let last = log.events.last, last.indicatedBitrate > 0 { kbps = last.indicatedBitrate / 1000 }
             renditionChanged(item)
             view?.droppedFrames(log.events.reduce(0) { $0 + max(0, $1.numberOfDroppedVideoFrames) })
+            accessLog(log)
         }
         on(.AVPlayerItemNewErrorLogEntry) { [weak self] note in
             guard let event = (note.object as? AVPlayerItem)?.errorLog()?.events.last else { return }
+            self?.requestFailed(RequestInfo(type: Self.requestType(event.uri), hostname: event.uri.flatMap { URL(string: $0)?.host },
+                                            error: event.errorDomain, errorCode: event.errorStatusCode, errorText: event.errorComment))
             self?.view?.failed(code: String(event.errorStatusCode), message: event.errorComment ?? "", fatal: false)
         }
+    }
+
+    /// Network requests (spec: Requests) from the access log: its media requests, bytes and transfer time
+    /// since the last entry. AVPlayer reports no response headers and no time to first byte.
+    private func accessLog(_ log: AVPlayerItemAccessLog) {
+        for (index, event) in log.events.enumerated() {
+            let before = reported[index] ?? (0, 0, 0)
+            let requests = max(0, event.numberOfMediaRequests - before.requests)
+            let bytes = max(0, event.numberOfBytesTransferred - before.bytes)
+            let seconds = max(0, event.transferDuration - before.seconds)
+            reported[index] = (max(before.requests, event.numberOfMediaRequests), max(before.bytes, event.numberOfBytesTransferred),
+                               max(before.seconds, event.transferDuration))
+            guard requests > 0 else { continue }
+            requestCompleted(RequestInfo(type: "media", hostname: event.uri.flatMap { URL(string: $0)?.host }, start: 0,
+                                         responseEnd: seconds * 1000, bytes: Int(bytes), count: requests))
+        }
+    }
+
+    nonisolated private static func requestType(_ uri: String?) -> String {
+        let path = (uri.flatMap { URL(string: $0)?.path } ?? "").lowercased()
+        if path.hasSuffix(".m3u8") { return "manifest" }
+        if uri?.lowercased().hasPrefix("skd://") == true { return "encryption" }
+        return "media"
     }
 
     private func stopItem() {
@@ -193,6 +241,31 @@ public final class AVPlayerMonitor: PlayerMonitor {
 
     private func renditionChanged(_ item: AVPlayerItem) {
         let size = item.presentationSize
-        view?.rendition(kbps: kbps, width: size.width > 0 ? Int(size.width) : nil, height: size.height > 0 ? Int(size.height) : nil)
+        view?.rendition(kbps: kbps, width: size.width > 0 ? Int(size.width) : nil, height: size.height > 0 ? Int(size.height) : nil,
+                        details: Self.details(of: item))
+    }
+
+    /// Codecs (as FourCC: avc1, hvc1, dvh1, mp4a…), frame rate and dynamic range of the item's playing tracks.
+    static func details(of item: AVPlayerItem) -> RenditionDetails {
+        var details = RenditionDetails()
+        for track in item.tracks where track.isEnabled {
+            guard let asset = track.assetTrack else { continue }
+            let code = (asset.formatDescriptions.first).map { fourCC(CMFormatDescriptionGetMediaSubType($0 as! CMFormatDescription)) }
+            if asset.mediaType == .video {
+                details.videoCodec = code
+                if asset.nominalFrameRate > 0 { details.framerate = Double(asset.nominalFrameRate) }
+                if #available(iOS 14, tvOS 14, macOS 11, *) {
+                    details.dynamicRange = code?.hasPrefix("dv") == true ? "Dolby Vision" : asset.hasMediaCharacteristic(.containsHDRVideo) ? "HDR" : "SDR"
+                }
+            } else if asset.mediaType == .audio {
+                details.audioCodec = code
+            }
+        }
+        return details
+    }
+
+    private static func fourCC(_ code: FourCharCode) -> String {
+        let bytes = [24, 16, 8, 0].map { UInt8((code >> $0) & 0xFF) }
+        return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespaces)
     }
 }

@@ -1,5 +1,16 @@
 package com.unifiedplay.data
 
+import java.util.Locale
+import java.util.UUID
+
+/** The device's Widevine security level (L1: hardware, L3: software), "" where it cannot tell. */
+val widevineSecurityLevel: String by lazy {
+    runCatching {
+        val drm = android.media.MediaDrm(UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"))
+        try { drm.getPropertyString("securityLevel") } finally { if (android.os.Build.VERSION.SDK_INT >= 28) drm.close() else @Suppress("DEPRECATION") drm.release() }
+    }.getOrDefault("")
+}
+
 /**
  * Takes ad events from an ad library (com.unifiedplay.data:ima) or from your own ad player.
  * Every monitor is one.
@@ -17,6 +28,10 @@ interface AdTarget {
     fun adError(code: String, message: String = "")
     /** The ads gave the video back. */
     fun adBreakEnd()
+    /** An ad request went out (VAST/VMAP): before the first pre-roll, its time is pre-roll request time. */
+    fun adRequest() {}
+    /** The ad response came back and was read. */
+    fun adResponse() {}
 }
 
 /**
@@ -27,10 +42,16 @@ interface AdTarget {
 abstract class PlayerMonitor(protected val client: DataClient, private val info: PlayerInfo) : AdTarget {
     protected var view: ViewTracker? = null
         private set
+    // Requests before a view exists (the manifest, a preload) go into it when it starts.
+    private val early = mutableListOf<Pair<Int, RequestInfo>>()
+    private var drmType = ""
+    private var mode = "standard"
+    private var captionsOn = false
     private var sourceAt: Long? = null
     private var readyAt: Long? = null
     private var width = 0
     private var height = 0
+    private val instanceId = UUID.randomUUID().toString()
     private val readPlayer: () -> Unit = { view?.let { beforeBeacon(it) } }
 
     init {
@@ -59,6 +80,8 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
         view = null
         sourceAt = if (hasSource) now() else null
         readyAt = null
+        early.clear()
+        drmType = ""
     }
 
     /** The player could start: player startup is done. */
@@ -73,13 +96,19 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
     protected fun current(): ViewTracker? {
         view?.let { if (!it.ended) return it }
         val video = describe() ?: return null
-        val next = ViewTracker(video, info.copy(autoplay = autoplay()))
+        val next = ViewTracker(video, info.copy(autoplay = autoplay(), instanceId = info.instanceId ?: instanceId, language = info.language ?: Locale.getDefault().toLanguageTag()))
         view = next
         client.add(next)
         next.playerSize(width, height)
         val source = sourceAt
         val ready = readyAt
         if (source != null && ready != null) next.playerStartup(ready - source)
+        if (drmType.isNotEmpty()) next.setDrmType(drmType)
+        if (drmType == "widevine") next.setDrmLevel(widevineSecurityLevel)
+        if (mode != "standard") next.playbackMode(mode)
+        if (captionsOn) next.captions(true)
+        for ((kind, request) in early) record(next, kind, request)
+        early.clear()
         onNewView(next)
         client.flush()
         return next
@@ -93,6 +122,64 @@ abstract class PlayerMonitor(protected val client: DataClient, private val info:
         this.width = width
         this.height = height
         view?.playerSize(width, height)
+    }
+
+    /** A content request came back (the monitors report their player's loads by themselves). */
+    fun requestCompleted(request: RequestInfo) = request(COMPLETED, request)
+
+    fun requestFailed(request: RequestInfo) = request(FAILED, request)
+
+    fun requestCanceled(request: RequestInfo) = request(CANCELED, request)
+
+    /** The DRM in use (widevine, playready, fairplay, clearkey). */
+    fun setDrmType(type: String) {
+        drmType = type
+        view?.setDrmType(type)
+        if (type == "widevine") view?.setDrmLevel(widevineSecurityLevel)
+    }
+
+    /** Captions turned on or off. */
+    fun captions(on: Boolean) {
+        captionsOn = captionsOn || on
+        view?.captions(on)
+    }
+
+    /** Your own rule stopped playback (geo-block, paywall, too many streams): the view ends without failing. */
+    fun businessException(code: String, message: String = "") {
+        current()?.failed(code, message, fatal = true, businessException = true)
+        client.flush()
+    }
+
+    override fun adRequest() {
+        current()?.adRequest()
+    }
+
+    override fun adResponse() {
+        view?.adResponse()
+    }
+
+    /** The app's player went fullscreen ("fullscreen"), picture-in-picture ("pip") or back ("standard"). */
+    fun playbackMode(next: String) {
+        mode = next
+        view?.playbackMode(next)
+    }
+
+    private fun request(kind: Int, request: RequestInfo) {
+        val open = view?.takeIf { !it.ended }
+        if (open != null) record(open, kind, request) else if (early.size < MAX_EARLY_REQUESTS) early += kind to request
+    }
+
+    private fun record(view: ViewTracker, kind: Int, request: RequestInfo) = when (kind) {
+        COMPLETED -> view.requestCompleted(request)
+        FAILED -> view.requestFailed(request)
+        else -> view.requestCanceled(request)
+    }
+
+    private companion object {
+        const val COMPLETED = 0
+        const val FAILED = 1
+        const val CANCELED = 2
+        const val MAX_EARLY_REQUESTS = 50
     }
 
     override fun adBreakStart() {
