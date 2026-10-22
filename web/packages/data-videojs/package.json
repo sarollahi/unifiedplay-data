@@ -1,6 +1,6 @@
 {
   "name": "@unifiedplay/data-videojs",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "UnifiedPlay Data for Video.js",
   "type": "module",
   "main": "dist/index.js",
@@ -26,7 +26,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@unifiedplay/data": "^1.1.0",
+    "@unifiedplay/data": "^1.1.1",
     "video.js": "*"
   },
   "peerDependenciesMeta": {

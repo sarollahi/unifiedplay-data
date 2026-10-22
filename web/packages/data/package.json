@@ -1,6 +1,6 @@
 {
   "name": "@unifiedplay/data",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "UnifiedPlay Data for the web: playback quality data from HTML5 video and players like it",
   "type": "module",
   "main": "dist/index.js",

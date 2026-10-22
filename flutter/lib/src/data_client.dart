@@ -10,7 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'view_tracker.dart';
 
 const sdkName = 'unifiedplay-data-flutter';
-const sdkVersion = '1.1.0';
+const sdkVersion = '1.1.1';
 const _beaconPath = '/api/v1/data/beacons';
 const _deviceKey = 'unifiedplay-data-device';
 // A beacon carries at most this much, far under the backend's 64 KB; the rest goes with the next ones.
