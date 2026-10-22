@@ -97,6 +97,7 @@ describe('Samsung Tizen AVPlay', () => {
     const mine = { onbufferingstart: vi.fn() }
     avplay.setListener(mine)
     avplay.open('https://cdn.example.com/movie.m3u8'); avplay.prepare(); avplay.play()
+    listener.oncurrentplaytime!(500)
     listener.onbufferingstart!(); listener.onbufferingcomplete!()
     listener.oncurrentplaytime!(42_000)
     avplay.seekTo(60_000, () => undefined)
@@ -109,6 +110,32 @@ describe('Samsung Tizen AVPlay', () => {
     expect(view.player).toMatchObject({ name: 'avplay', version: '6.5' })
     expect(view.metrics).toMatchObject({ rebuffer_count: 1, seek_count: 1, playhead_ms: 42_000 })
     expect(view.ended).toBe(true)
+  })
+
+  it('ends startup at the first time update, not when play() returns on a prepared stream', async () => {
+    let time = 1000
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => time)
+    const { data, beacons } = client({ platform: 'tizen' })
+    let listener: AvPlayListener = {}
+    let state = 'NONE'
+    const avplay = {
+      open: (_url: string) => { state = 'IDLE' }, prepare: () => { state = 'READY' }, play: () => { state = 'PLAYING' }, pause: () => { state = 'PAUSED' },
+      stop: () => { state = 'IDLE' }, close: () => { state = 'NONE' }, setListener: (next: AvPlayListener) => { listener = next },
+      getState: () => state, getCurrentTime: () => 0,
+    }
+    monitorAvPlay(data, avplay)
+    avplay.open('https://cdn.example.com/reel.m3u8'); avplay.prepare()
+    avplay.play()
+    time += 240
+    listener.oncurrentplaytime!(0) // the position before anything moved
+    time += 20
+    listener.oncurrentplaytime!(17)
+    time += 1000
+    avplay.pause(); avplay.play() // a resume plays at once
+    const view = (await beacons()).flatMap(beacon => beacon.views).at(-1)
+    expect(view.metrics.video_startup_ms).toBe(260)
+    expect(view.events.at(-1).type).toBe('playing')
+    now.mockRestore()
   })
 })
 
