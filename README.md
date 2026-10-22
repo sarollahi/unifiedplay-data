@@ -41,8 +41,8 @@ web: ES modules (any bundler, or `<script type="module">`).
 
 ```kotlin
 dependencies {
-    implementation("com.unifiedplay.data:media3:1.1.0")
-    implementation("com.unifiedplay.data:ima:1.1.0") // only with IMA ads
+    implementation("com.unifiedplay.data:media3:1.1.1")
+    implementation("com.unifiedplay.data:ima:1.1.1") // only with IMA ads
 }
 ```
 
@@ -77,7 +77,7 @@ takes the player's listeners, so set yours on the monitor (`monitor.onPrepared =
 
 ## iOS and tvOS
 
-Swift Package Manager: `https://github.com/sarollahi/unifiedplay-data`, from `1.1.0`. Products:
+Swift Package Manager: `https://github.com/sarollahi/unifiedplay-data`, from `1.1.1`. Products:
 `UnifiedPlayData`, and on iOS, for IMA ads, `UnifiedPlayDataIMA`.
 
 ```swift
@@ -185,7 +185,7 @@ useEffect(() => () => monitor.stop(), [monitor])
 ```yaml
 dependencies:
   unifiedplay_data:
-    git: { url: https://github.com/sarollahi/unifiedplay-data, path: flutter, ref: v1.1.0 }
+    git: { url: https://github.com/sarollahi/unifiedplay-data, path: flutter, ref: v1.1.1 }
 ```
 
 ```dart

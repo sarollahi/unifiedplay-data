@@ -6,7 +6,7 @@ sub init()
 end sub
 
 function UPD_SdkVersion() as string
-    return "1.1.0"
+    return "1.1.1"
 end function
 
 sub UPD_Run()

@@ -1,6 +1,6 @@
 {
   "name": "@unifiedplay/data-hlsjs",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "UnifiedPlay Data for hls.js: bitrates and errors",
   "type": "module",
   "main": "dist/index.js",
@@ -26,7 +26,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@unifiedplay/data": "^1.1.0",
+    "@unifiedplay/data": "^1.1.1",
     "hls.js": "*"
   },
   "peerDependenciesMeta": {
