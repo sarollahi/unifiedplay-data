@@ -4,8 +4,9 @@ name: Publish
 # Central, the web packages to npm. The Swift package needs nothing: SwiftPM reads the tag itself;
 # Roku channels copy the roku/ files of the tag, and Flutter apps take the flutter/ package from it.
 # Secrets: MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD (a Central Portal user token) and
-# SIGNING_KEY / SIGNING_KEY_PASSWORD (the armored GPG key the artifacts are signed with). npm needs
-# no secret: every package trusts this workflow (npm trusted publishing).
+# SIGNING_KEY / SIGNING_KEY_PASSWORD (the armored GPG key the artifacts are signed with). npm packages
+# trust this workflow (npm trusted publishing); NPM_TOKEN only stages a package that is new on npm,
+# because npm can set up trust only once a package exists.
 on:
   release:
     types: [published]
@@ -83,5 +84,8 @@ jobs:
       # MIT: the notice goes with every copy, so each package carries the license text.
       - run: for package in packages/*; do cp ../LICENSE "$package/"; done
       # Staged: each version waits on npmjs.com until a maintainer approves it with 2FA. npm stage
-      # ignores workspaces, so each package is staged from its own folder.
+      # ignores workspaces, so each package is staged from its own folder. npm prefers trusted
+      # publishing; the token is only used for packages that do not trust this workflow yet.
       - run: for package in packages/*; do (cd "$package" && npm stage publish --access public --provenance); done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
