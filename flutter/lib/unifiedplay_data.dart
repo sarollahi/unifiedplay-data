@@ -2,5 +2,5 @@
 library unifiedplay_data;
 
 export 'src/data_client.dart' show DataClient, DataConfig, sdkVersion;
-export 'src/view_tracker.dart' show PlayerInfo, RequestInfo, VideoInfo, ViewTracker, drmTypeOf;
+export 'src/view_tracker.dart' show PlayerInfo, RenditionDetails, RequestInfo, VideoInfo, ViewTracker, drmTypeOf;
 export 'src/video_player_monitor.dart' show VideoPlayerMonitor;
