@@ -21,6 +21,12 @@ class VideoInfo {
     this.experimentName,
     this.subPropertyId,
     this.custom = const {},
+    this.affiliate,
+    this.brand,
+    this.producer,
+    this.creatorId,
+    this.variantId,
+    this.drmLevel,
   });
 
   final String? id;
@@ -61,13 +67,49 @@ class VideoInfo {
 
   /// Up to ten of your own dimensions (1..10); the Console breaks views down by them.
   final Map<int, String> custom;
+
+  /// Who distributes or sells the video (a partner channel).
+  final String? affiliate;
+
+  /// The brand the video is under.
+  final String? brand;
+  final String? producer;
+
+  /// The creator's id, for services with many creators.
+  final String? creatorId;
+
+  /// Your id for the variant (see variantName).
+  final String? variantId;
+
+  /// Widevine L1 / L3…, when you know it.
+  final String? drmLevel;
 }
 
 class PlayerInfo {
-  const PlayerInfo(this.name, {this.version, this.autoplay = false});
+  const PlayerInfo(this.name, {this.version, this.autoplay = false, this.software, this.softwareVersion, this.language});
+
+  /// Your name for this player ("main", "tv-player"); the Console groups views by it.
   final String name;
   final String? version;
   final bool autoplay;
+
+  /// The player library and its version; the monitor fills these.
+  final String? software;
+  final String? softwareVersion;
+
+  /// The viewer's language.
+  final String? language;
+}
+
+/// What the playing rendition is, where the player tells.
+class RenditionDetails {
+  const RenditionDetails({this.videoCodec, this.audioCodec, this.framerate, this.dynamicRange});
+  final String? videoCodec;
+  final String? audioCodec;
+  final double? framerate;
+
+  /// SDR, HDR10, HLG, Dolby Vision…
+  final String? dynamicRange;
 }
 
 /// One network request for the content (spec: Requests). type: manifest, video, audio, video_init,
@@ -167,7 +209,13 @@ class ViewTracker {
   String drmType;
   bool _fullscreen = false;
   bool _pip = false;
+  bool _remote = false;
   String _mode = 'standard';
+  RenditionDetails _details = const RenditionDetails();
+  bool _initialSet = false;
+  double? _initialKbps;
+  int? _initialWidth, _initialHeight;
+  int _upshifts = 0, _downshifts = 0;
   bool _captions = false;
   // Pre-roll (spec: Startup): when it was asked to play, the open ad request, the last ad response.
   double? _prerollAt, _adRequestAt, _adResponseAt;
@@ -251,11 +299,31 @@ class ViewTracker {
     if (paused) _move(_State.paused);
   }
 
-  void rendition(double? kbps, int? width, int? height) {
+  void rendition(double? kbps, int? width, int? height, [RenditionDetails? details]) {
     if (_state == _State.ad) return;
+    if (details != null) renditionDetails(details);
     if (kbps == _kbps && width == _videoWidth && height == _videoHeight) return;
     _account();
-    if (_firstFrame) _renditionChanges += 1;
+    if (!_initialSet && (kbps != null || width != null)) {
+      _initialSet = true;
+      _initialKbps = kbps;
+      _initialWidth = width;
+      _initialHeight = height;
+    }
+    if (_firstFrame) {
+      _renditionChanges += 1;
+      // Up or down by bitrate, or by size where the player tells no bitrate.
+      final previous = _kbps;
+      final before = kbps != null && previous != null ? previous : _videoHeight?.toDouble();
+      final after = kbps != null && previous != null ? kbps : height?.toDouble();
+      if (before != null && after != null && after != before) {
+        if (after > before) {
+          _upshifts += 1;
+        } else {
+          _downshifts += 1;
+        }
+      }
+    }
     _kbps = kbps;
     _videoWidth = width;
     _videoHeight = height;
@@ -436,12 +504,23 @@ class ViewTracker {
     _event('requestcanceled', {'type': request.type, 'hostname': request.hostname});
   }
 
-  /// standard, fullscreen, pip, or your own name.
+  /// Codecs, frame rate or dynamic range of what plays, as the player tells them (any part at a time).
+  void renditionDetails(RenditionDetails next) {
+    _details = RenditionDetails(
+      videoCodec: next.videoCodec ?? _details.videoCodec,
+      audioCodec: next.audioCodec ?? _details.audioCodec,
+      framerate: next.framerate ?? _details.framerate,
+      dynamicRange: next.dynamicRange ?? _details.dynamicRange,
+    );
+  }
+
+  /// standard, fullscreen, pip, remote (AirPlay, Cast), or your own name.
   void playbackMode(String mode) {
     if (mode == _mode) return;
     _mode = mode;
     if (mode == 'fullscreen') _fullscreen = true;
     if (mode == 'pip') _pip = true;
+    if (mode == 'remote') _remote = true;
     _event('playbackmodechange', {'mode': mode});
   }
 
@@ -481,11 +560,19 @@ class ViewTracker {
         'duration_ms': video.durationMs, 'stream_type': video.streamType, 'source_type': video.sourceType,
         'source_host': video.sourceHost, 'cdn': cdn.isEmpty ? null : cdn, 'drm_type': drmType.isEmpty ? null : drmType,
         'content_type': video.contentType, 'language_code': video.languageCode,
-        'variant_name': video.variantName, 'encoding_variant': video.encodingVariant,
+        'variant_name': video.variantName, 'variant_id': video.variantId, 'encoding_variant': video.encodingVariant,
+        'affiliate': video.affiliate, 'brand': video.brand, 'producer': video.producer, 'creator_id': video.creatorId,
+        'drm_level': video.drmLevel,
       },
       'player': {
         'name': player.name, 'version': player.version, 'autoplay': player.autoplay,
         'width': _playerWidth, 'height': _playerHeight, 'fullscreen': _fullscreen, 'pip': _pip, 'captions': _captions,
+        'software': player.software, 'software_version': player.softwareVersion, 'language': player.language, 'remote_played': _remote,
+      },
+      'rendition': {
+        'video_codec': _details.videoCodec, 'audio_codec': _details.audioCodec, 'framerate': _details.framerate,
+        'dynamic_range': _details.dynamicRange, 'initial_bitrate_kbps': _initialKbps?.round(),
+        'initial_width': _initialWidth, 'initial_height': _initialHeight,
       },
       if (video.viewSessionId != null) 'view_session_id': video.viewSessionId,
       if (video.experimentName != null) 'experiment_name': video.experimentName,
@@ -534,6 +621,8 @@ class ViewTracker {
         'upscale_pct_ms': _upscalePctMs.round(),
         'downscale_pct_ms': _downscalePctMs.round(),
         'max_downscale_pct': _maxDownscalePct,
+        'rendition_upshifts': _upshifts,
+        'rendition_downshifts': _downshifts,
       },
       'custom': {for (final e in video.custom.entries) if (e.value.isNotEmpty) '${e.key}': e.value},
       'error': _error,

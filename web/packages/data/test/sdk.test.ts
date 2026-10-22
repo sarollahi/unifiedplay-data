@@ -198,3 +198,40 @@ describe('webDevice', () => {
     expect(webDevice(chrome)).toMatchObject({ os: 'Windows', browser: 'Chrome', browser_version: '141.0.0.0', model: 'Desktop' })
   })
 })
+
+describe('more view fields', () => {
+  it('counts up- and downshifts, keeps the first rendition and its codecs, the CDN edge, and playing on another screen', () => {
+    const c = clock()
+    const view = new ViewTracker({ id: 'ep_1', brand: 'Drama+', creatorId: 'studio-9', drmLevel: 'L1' },
+      { name: 'main', software: 'Shaka Player', softwareVersion: '4.13.25', language: 'sv', preload: true }, c.now)
+    view.rendition(1500, 1280, 720, { videoCodec: 'avc1.640028', audioCodec: 'mp4a.40.2' })
+    view.play(); c.advance(500); view.playing()
+    view.rendition(3000, 1920, 1080, { framerate: 25, dynamicRange: 'SDR' })
+    view.rendition(800, 960, 540)
+    view.rendition(800, 960, 540)  // no change, no shift
+    view.requestCompleted({ type: 'video', headers: { 'X-Amz-Cf-Pop': 'ARN56-P1' } })
+    view.playbackMode('remote')
+    const snapshot = view.snapshot()
+    expect(snapshot.metrics).toMatchObject({ rendition_changes: 2, rendition_upshifts: 1, rendition_downshifts: 1 })
+    expect(snapshot.rendition).toEqual({ video_codec: 'avc1.640028', audio_codec: 'mp4a.40.2', framerate: 25, dynamic_range: 'SDR',
+      initial_bitrate_kbps: 1500, initial_width: 1280, initial_height: 720 })
+    expect(snapshot.video).toMatchObject({ brand: 'Drama+', creator_id: 'studio-9', drm_level: 'L1', cdn_edge_pop: 'ARN56-P1' })
+    expect(snapshot.player).toMatchObject({ software: 'Shaka Player', software_version: '4.13.25', language: 'sv', preload: true, remote_played: true })
+  })
+
+  it('tells the device category and sends the viewer’s plan', async () => {
+    const { deviceCategory } = await import('../src/client.js')
+    expect(deviceCategory('Mozilla/5.0 (Web0S; Linux/SmartTV) Chrome/120')).toBe('tv')
+    expect(deviceCategory('Mozilla/5.0 (iPad; CPU OS 18_1 like Mac OS X)')).toBe('tablet')
+    expect(deviceCategory('Mozilla/5.0 (Linux; Android 14; Pixel 8) Mobile Safari')).toBe('phone')
+    expect(deviceCategory('Mozilla/5.0 (X11; CrOS x86_64) CrKey/1.56')).toBe('chromecast')
+    expect(deviceCategory('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')).toBe('desktop')
+    const send = vi.fn(async () => ({ status: 202, enabled: true }))
+    const client = new DataClient({ key: 'up_data_x', deviceId: 'd1', viewer: { plan: 'premium', planStatus: 'trialing' } }, send)
+    const view = new ViewTracker({}, { name: 'test' })
+    client.add(view)
+    await client.flush()
+    const body = JSON.parse((send.mock.calls[0] as unknown as [string, string])[1])
+    expect(body.viewer).toMatchObject({ device_id: 'd1', plan: 'premium', plan_status: 'trialing' })
+  })
+})

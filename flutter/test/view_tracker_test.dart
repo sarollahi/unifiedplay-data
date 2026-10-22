@@ -134,4 +134,24 @@ void main() {
     expect(urls.single.toString(), 'https://data.example.com/api/v1/data/beacons');
     expect(data.disabled, true);
   });
+
+  test('counts up- and downshifts and keeps the first rendition and its codecs', () {
+    var time = 0.0;
+    final view = ViewTracker(const VideoInfo(id: 'ep_1', brand: 'Drama+'), const PlayerInfo('main', software: 'video_player'), now: () => time);
+    view.rendition(1500, 1280, 720, const RenditionDetails(videoCodec: 'avc1'));
+    view.play();
+    time += 500;
+    view.playing();
+    view.rendition(3000, 1920, 1080);
+    view.rendition(800, 960, 540, const RenditionDetails(audioCodec: 'mp4a'));
+    view.playbackMode('remote');
+    final snapshot = view.snapshot();
+    final metrics = snapshot['metrics'] as Map<String, Object?>;
+    expect(metrics['rendition_upshifts'], 1);
+    expect(metrics['rendition_downshifts'], 1);
+    final rendition = snapshot['rendition'] as Map<String, Object?>;
+    expect([rendition['video_codec'], rendition['audio_codec'], rendition['initial_bitrate_kbps'], rendition['initial_height']], ['avc1', 'mp4a', 1500, 720]);
+    expect((snapshot['player'] as Map<String, Object?>)['remote_played'], true);
+    expect((snapshot['video'] as Map<String, Object?>)['brand'], 'Drama+');
+  });
 }

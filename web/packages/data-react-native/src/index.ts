@@ -39,7 +39,7 @@ export interface ReactNativeVideoMonitor extends PlayerDriver {
  * ```
  */
 export function monitorReactNativeVideo(client: DataClient, video: VideoInfo, version?: string): ReactNativeVideoMonitor {
-  const driver = playerDriver(client, { name: 'react-native-video', version })
+  const driver = playerDriver(client, { name: 'react-native-video', version, software: 'react-native-video', softwareVersion: version })
   let paused = true
   let buffering = false
   let seekPaused = false

@@ -39,6 +39,35 @@ data class VideoInfo(
     val subPropertyId: String? = null,
     /** Up to ten of your own dimensions (1..10); the Console breaks views down by them. */
     val custom: Map<Int, String> = emptyMap(),
+    /** Who distributes or sells the video (a partner channel). */
+    val affiliate: String? = null,
+    /** The brand the video is under. */
+    val brand: String? = null,
+    val producer: String? = null,
+    /** The creator's id, for services with many creators. */
+    val creatorId: String? = null,
+    /** Your id for the variant (see variantName). */
+    val variantId: String? = null,
+    /** Widevine L1 / L3…, when the monitor cannot tell. */
+    val drmLevel: String? = null,
+)
+
+/** What the playing rendition is, where the player tells. */
+data class RenditionDetails(
+    val videoCodec: String? = null,
+    val audioCodec: String? = null,
+    val framerate: Double? = null,
+    /** SDR, HDR10, HLG, Dolby Vision… */
+    val dynamicRange: String? = null,
+)
+
+// Response headers that name the CDN edge (point of presence) that served a request.
+private val POP_HEADERS: List<Pair<String, (String) -> String>> = listOf(
+    "x-amz-cf-pop" to { value -> value },
+    "x-served-by" to { value -> value.split(',').last().trim().split('-').last() },
+    "cf-ray" to { value -> value.split('-').last() },
+    "x-edge-location" to { value -> value },
+    "x-cdn-pop" to { value -> value },
 )
 
 /**
@@ -75,7 +104,23 @@ fun drmTypeOf(keySystem: String?): String {
     }
 }
 
-data class PlayerInfo(val name: String, val version: String? = null, val autoplay: Boolean = false)
+data class PlayerInfo(
+    /** Your name for this player ("main", "tv-player"); the Console groups views by it. */
+    val name: String,
+    val version: String? = null,
+    val autoplay: Boolean = false,
+    /** The player library and its version (Media3, ExoPlayer…); the monitors fill these. */
+    val software: String? = null,
+    val softwareVersion: String? = null,
+    /** One id per player, made by the monitor. */
+    val instanceId: String? = null,
+    /** The viewer's language, by default the device's. */
+    val language: String? = null,
+    /** The player loads the video before play is asked for. */
+    val preload: Boolean = false,
+    /** A live stream the viewer can pause and rewind (DVR window). */
+    val timeShift: Boolean = false,
+)
 
 /**
  * One view: what happened since playback of one video was asked for, and the totals the beacon
@@ -123,6 +168,16 @@ class ViewTracker(
     private var prerollAt: Long? = null
     private var adRequestAt: Long? = null
     private var adResponseAt: Long? = null
+    private var details = RenditionDetails()
+    private var initialKbps: Double? = null
+    private var initialWidth: Int? = null
+    private var initialHeight: Int? = null
+    private var initialSet = false
+    private var remote = false
+    private var edgePop = ""
+    private var upshifts = 0
+    private var downshifts = 0
+    private var drmLevel = ""
     var ended = false
         private set
 
@@ -242,12 +297,13 @@ class ViewTracker(
         event("adresponse")
     }
 
-    /** standard, fullscreen, pip, or your own name. */
+    /** standard, fullscreen, pip, remote (Cast, another screen), or your own name. */
     fun playbackMode(next: String) {
         if (next == mode) return
         mode = next
         if (next == "fullscreen") fullscreen = true
         if (next == "pip") pip = true
+        if (next == "remote") remote = true
         event("playbackmodechange", mapOf("mode" to next))
     }
 
@@ -255,7 +311,27 @@ class ViewTracker(
         if (type.isNotEmpty()) drmType = type
     }
 
+    /** Widevine L1 / L3…: the monitors tell it when the DRM is Widevine. */
+    fun setDrmLevel(level: String) {
+        if (level.isNotEmpty()) drmLevel = level
+    }
+
+    /** Codecs, frame rate or dynamic range of what plays, as the player tells them (any part at a time). */
+    fun renditionDetails(details: RenditionDetails) {
+        this.details = RenditionDetails(
+            details.videoCodec ?: this.details.videoCodec, details.audioCodec ?: this.details.audioCodec,
+            details.framerate ?: this.details.framerate, details.dynamicRange ?: this.details.dynamicRange,
+        )
+    }
+
     private fun cdnFrom(request: RequestInfo) {
+        for ((header, read) in POP_HEADERS) {
+            val value = request.headers.entries.firstOrNull { it.key.equals(header, ignoreCase = true) }?.value?.firstOrNull()?.trim()
+            if (!value.isNullOrEmpty()) {
+                edgePop = read(value).take(64)
+                break
+            }
+        }
         // An app-set CDN wins; otherwise the latest X-CDN header names it.
         val name = request.headers.entries.firstOrNull { it.key.equals("x-cdn", ignoreCase = true) }?.value?.firstOrNull()?.trim()?.take(64)
         if (name.isNullOrEmpty() || video.cdn != null || name == cdn) return
@@ -327,11 +403,24 @@ class ViewTracker(
         if (paused) move(State.PAUSED)
     }
 
-    fun rendition(kbps: Double?, width: Int?, height: Int?) {
+    fun rendition(kbps: Double?, width: Int?, height: Int?, details: RenditionDetails? = null) {
         if (state == State.AD) return // an ad's own rendition, in players that play ads themselves
+        if (details != null) renditionDetails(details)
         if (kbps == this.kbps && width == videoWidth && height == videoHeight) return
         account()
-        if (firstFrame) renditionChanges += 1
+        if (!initialSet && (kbps != null || width != null)) {
+            initialSet = true
+            initialKbps = kbps
+            initialWidth = width
+            initialHeight = height
+        }
+        if (firstFrame) {
+            renditionChanges += 1
+            // Up or down by bitrate, or by size where the player tells no bitrate.
+            val previous = this.kbps
+            val (before, after) = if (kbps != null && previous != null) previous to kbps else videoHeight?.toDouble() to height?.toDouble()
+            if (before != null && after != null && after != before) if (after > before) upshifts += 1 else downshifts += 1
+        }
         this.kbps = kbps
         videoWidth = width
         videoHeight = height
@@ -479,11 +568,20 @@ class ViewTracker(
                 "source_type" to video.sourceType, "source_host" to video.sourceHost,
                 "cdn" to cdn.ifEmpty { null }, "drm_type" to drmType.ifEmpty { null },
                 "content_type" to video.contentType, "language_code" to video.languageCode,
-                "variant_name" to video.variantName, "encoding_variant" to video.encodingVariant,
+                "variant_name" to video.variantName, "variant_id" to video.variantId, "encoding_variant" to video.encodingVariant,
+                "affiliate" to video.affiliate, "brand" to video.brand, "producer" to video.producer, "creator_id" to video.creatorId,
+                "drm_level" to (video.drmLevel ?: drmLevel.ifEmpty { null }), "cdn_edge_pop" to edgePop.ifEmpty { null },
             ),
             "player" to mapOf(
                 "name" to player.name, "version" to player.version, "autoplay" to player.autoplay,
                 "width" to playerWidth, "height" to playerHeight, "fullscreen" to fullscreen, "pip" to pip, "captions" to captionsOn,
+                "software" to player.software, "software_version" to player.softwareVersion, "instance_id" to player.instanceId,
+                "language" to player.language, "preload" to player.preload, "remote_played" to remote, "time_shift" to player.timeShift,
+            ),
+            "rendition" to mapOf(
+                "video_codec" to details.videoCodec, "audio_codec" to details.audioCodec, "framerate" to details.framerate,
+                "dynamic_range" to details.dynamicRange, "initial_bitrate_kbps" to initialKbps?.roundToLong(),
+                "initial_width" to initialWidth, "initial_height" to initialHeight,
             ),
             "view_session_id" to video.viewSessionId,
             "experiment_name" to video.experimentName,
@@ -532,6 +630,8 @@ class ViewTracker(
                 "upscale_pct_ms" to upscalePctMs.roundToLong(),
                 "downscale_pct_ms" to downscalePctMs.roundToLong(),
                 "max_downscale_pct" to maxDownscalePct,
+                "rendition_upshifts" to upshifts,
+                "rendition_downshifts" to downshifts,
             ),
             "custom" to video.custom.filterValues { it.isNotEmpty() }.mapKeys { it.key.toString() },
             "error" to error,

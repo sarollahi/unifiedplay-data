@@ -7,6 +7,31 @@ final class ViewTrackerTests: XCTestCase {
     private func metrics(_ snapshot: [String: Any]) -> [String: Any] { snapshot["metrics"] as! [String: Any] }
     private func types(_ snapshot: [String: Any]) -> [String] { (snapshot["events"] as! [[String: Any]]).map { $0["type"] as! String } }
 
+    func testCountsShiftsAndKeepsTheFirstRenditionCodecsEdgeAndRemotePlay() {
+        let view = ViewTracker(video: VideoInfo(id: "ep_1", brand: "Drama+", creatorID: "studio-9"),
+                               player: PlayerInfo(name: "main", software: "AVPlayer", language: "sv")) { [unowned self] in time }
+        view.rendition(kbps: 1500, width: 1280, height: 720, details: RenditionDetails(videoCodec: "hvc1"))
+        view.play(); time += 500; view.playing()
+        view.rendition(kbps: 3000, width: 1920, height: 1080, details: RenditionDetails(framerate: 25, dynamicRange: "HDR"))
+        view.rendition(kbps: 800, width: 960, height: 540)
+        view.requestCompleted(RequestInfo(type: "video", headers: ["X-Served-By": "cache-arn1234-ARN"]))
+        view.playbackMode("remote")
+        let snapshot = view.snapshot()
+        XCTAssertEqual(metrics(snapshot)["rendition_upshifts"] as? Int, 1)
+        XCTAssertEqual(metrics(snapshot)["rendition_downshifts"] as? Int, 1)
+        let rendition = snapshot["rendition"] as! [String: Any]
+        XCTAssertEqual(rendition["video_codec"] as? String, "hvc1")
+        XCTAssertEqual(rendition["dynamic_range"] as? String, "HDR")
+        XCTAssertEqual(rendition["initial_bitrate_kbps"] as? Int, 1500)
+        XCTAssertEqual(rendition["initial_height"] as? Int, 720)
+        let video = snapshot["video"] as! [String: Any]
+        XCTAssertEqual(video["brand"] as? String, "Drama+")
+        XCTAssertEqual(video["cdn_edge_pop"] as? String, "ARN")
+        let player = snapshot["player"] as! [String: Any]
+        XCTAssertEqual(player["software"] as? String, "AVPlayer")
+        XCTAssertEqual(player["remote_played"] as? Bool, true)
+    }
+
     func testSplitsTimeIntoStartupPlayingRebufferingAndSeeking() {
         let view = tracker()
         view.playerStartup(100)

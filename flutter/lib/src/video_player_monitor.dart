@@ -13,7 +13,7 @@ import 'view_tracker.dart';
 /// ```
 class VideoPlayerMonitor {
   VideoPlayerMonitor(this.client, this.controller, this._video, {String? version})
-      : _player = PlayerInfo('video_player', version: version) {
+      : _player = PlayerInfo('video_player', version: version, software: 'video_player', softwareVersion: version) {
     _sourceAt = _now();
     controller.addListener(_changed);
     _changed();

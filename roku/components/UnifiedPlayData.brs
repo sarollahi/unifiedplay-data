@@ -21,6 +21,7 @@ sub UPD_Run()
     m.config = config
     m.view = invalid
     m.views = []
+    m.instanceId = UPD_NewId()
     m.transfers = {}
     m.disabled = false
     m.session = CreateObject("roDeviceInfo").GetRandomUUID()
@@ -94,7 +95,9 @@ function UPD_Current() as dynamic
     if m.view <> invalid and not m.view.ended then return m.view
     if m.nextVideo = invalid then return invalid
     app = CreateObject("roAppInfo")
-    m.view = UPD_NewTracker(m.nextVideo, { name: "roku", version: UPD_OsVersion(), autoplay: false })
+    info = CreateObject("roDeviceInfo")
+    m.view = UPD_NewTracker(m.nextVideo, { name: "roku", version: UPD_OsVersion(), autoplay: false, software: "Roku Video", software_version: UPD_OsVersion(),
+                                           instance_id: m.instanceId, language: info.GetCurrentLocale().Replace("_", "-") })
     if m.video.width > 0 and m.video.height > 0 then m.view.playerSize(m.video.width, m.video.height)
     if m.sourceAt <> invalid and m.readyAt <> invalid then m.view.playerStartup(m.readyAt - m.sourceAt)
     m.views.Push(m.view)
@@ -168,7 +171,7 @@ function UPD_OnField(field as string, data as dynamic) as boolean
             height = invalid
             if data.width <> invalid and data.width > 0 then width = data.width
             if data.height <> invalid and data.height > 0 then height = data.height
-            view.rendition(kbps, width, height)
+            view.rendition(kbps, width, height, UPD_Formats(m.video))
         end if
     else if field = "downloadedSegment" then
         UPD_Downloaded(view, data)
@@ -234,7 +237,8 @@ function UPD_Device() as object
     if info.GetConnectionType() = "WiredConnection" then connection = "wired"
     appVersion = UPD_Text(m.config.appVersion)
     if appVersion = "" then appVersion = app.GetVersion()
-    return { os: "Roku OS", os_version: UPD_OsVersion(), manufacturer: "Roku", model: info.GetModel(), app_id: app.GetID(), app_version: appVersion, connection: connection }
+    return { os: "Roku OS", os_version: UPD_OsVersion(), manufacturer: "Roku", model: info.GetModel(), app_id: app.GetID(), app_version: appVersion,
+             connection: connection, category: "tv", name: info.GetModelDisplayName() }
 end function
 
 ' Sends every open view in one beacon; one beacon at a time.
@@ -250,7 +254,8 @@ sub UPD_Send()
     userId = UPD_Text(m.config.userId)
     body = FormatJson({
         sdk: { name: "unifiedplay-data-roku", version: UPD_SdkVersion() }, session_id: m.session,
-        viewer: { device_id: CreateObject("roDeviceInfo").GetChannelClientId(), user_id: userId },
+        viewer: { device_id: CreateObject("roDeviceInfo").GetChannelClientId(), user_id: userId, plan: UPD_Text(m.config.viewerPlan),
+                  plan_status: UPD_Text(m.config.viewerPlanStatus), plan_category: UPD_Text(m.config.viewerPlanCategory) },
         device: UPD_Device(), views: snapshots
     })
     base = "https://backend.unifiedplay.com"
@@ -300,3 +305,13 @@ sub UPD_OnResponse(msg as object)
     end if
     ' 429, 5xx, offline: the events stay and go with the next beacon.
 end sub
+
+' The Video node's codecs ("mpeg4 avc" → avc, "hevc", "vp9"; audio "aac", "ac3"…) and dynamic range, where it tells.
+function UPD_Formats(video as object) as object
+    details = {}
+    videoFormat = UPD_Text(video.videoFormat)
+    if videoFormat <> "" then details.video_codec = videoFormat.Replace("mpeg4 ", "")
+    audioFormat = UPD_Text(video.audioFormat)
+    if audioFormat <> "" then details.audio_codec = audioFormat
+    return details
+end function

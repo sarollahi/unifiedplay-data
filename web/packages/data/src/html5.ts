@@ -1,4 +1,4 @@
-import { ViewTracker, type PageInfo, type PlayerInfo, type RequestInfo, type VideoInfo } from './tracker.js'
+import { ViewTracker, type PageInfo, type PlayerInfo, type RenditionDetails, type RequestInfo, type VideoInfo } from './tracker.js'
 import type { DataClient } from './client.js'
 
 export interface VideoMonitor {
@@ -6,8 +6,10 @@ export interface VideoMonitor {
   setVideo(video: VideoInfo): void
   /** Which player plays the next view (e.g. once a streaming library takes over the element). */
   setPlayer(player: PlayerInfo): void
-  /** The rendition playing now, from the streaming library (see @unifiedplay/data-hlsjs, -shaka…). */
-  rendition(kbps: number | null, width: number | null, height: number | null): void
+  /** The player library and its version (the -hlsjs, -shaka… packages tell); your own player name stays. */
+  playerSoftware?(name: string, version?: string): void
+  /** The rendition playing now, from the streaming library (see @unifiedplay/data-hlsjs, -shaka…), with its codecs where known. */
+  rendition(kbps: number | null, width: number | null, height: number | null, details?: RenditionDetails): void
   /** A playback error. businessException: your own rule stopped playback (geo-block, paywall…), no failure. */
   error(code: string, message: string, fatal: boolean, businessException?: boolean): void
   /** Live streams: the distance to the live edge (the -hlsjs, -dashjs, -shaka packages report it). */
@@ -48,6 +50,8 @@ export interface MediaLike {
   readonly paused: boolean
   readonly ended: boolean
   readonly autoplay?: boolean
+  readonly poster?: string
+  readonly preload?: string
   readonly currentSrc?: string
   readonly src?: string
   readonly videoWidth?: number
@@ -66,6 +70,11 @@ export interface MonitorOptions {
 // Requests before a view exists (the manifest, a preload) go into it when it starts; a few are enough.
 const MAX_EARLY_REQUESTS = 50
 type EarlyRequest = ['requestCompleted' | 'requestFailed' | 'requestCanceled', RequestInfo]
+
+export function newInstanceId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`
+}
 
 // Page load time goes with the first view on the page only.
 let pageLoadTaken = false
@@ -101,7 +110,8 @@ export function monitorVideo(
   let info = video
   let player = playerInfo
   let view: ViewTracker | null = null
-  let rendition: [number | null, number | null, number | null] | null = null
+  let rendition: [number | null, number | null, number | null, RenditionDetails?] | null = null
+  const instanceId = newInstanceId()
   let early: EarlyRequest[] = []
   let drmType = ''
   let mode = 'standard'
@@ -116,7 +126,10 @@ export function monitorVideo(
   }
   const current = (): ViewTracker => {
     if (!view || view.ended) {
-      view = new ViewTracker(info, { ...player, autoplay: Boolean(element.autoplay) })
+      view = new ViewTracker(info, {
+        language: typeof navigator === 'undefined' ? undefined : navigator.language, instanceId, ...player, autoplay: Boolean(element.autoplay),
+        poster: player.poster ?? (element.poster ? element.poster.split(/[?#]/)[0] : undefined), preload: player.preload ?? element.preload === 'auto',
+      })
       client.add(view)
       size()
       const page = pageInfo()
@@ -203,6 +216,12 @@ export function monitorVideo(
     if (view && !view.ended) view[kind](info)
     else if (early.length < MAX_EARLY_REQUESTS) early.push([kind, info])
   }
+  // AirPlay and the Remote Playback API (Chromecast from Chrome): the view played on another screen.
+  const remote = (element as MediaLike & { remote?: { state?: string; addEventListener?(type: string, listener: () => void): void; removeEventListener?(type: string, listener: () => void): void } }).remote
+  const remoteChanged = () => { if (remote?.state === 'connected') { mode = 'remote'; view?.playbackMode('remote') } }
+  remote?.addEventListener?.('connect', remoteChanged)
+  const airplay = () => { if ((element as MediaLike & { webkitCurrentPlaybackTargetIsWireless?: boolean }).webkitCurrentPlaybackTargetIsWireless) { mode = 'remote'; view?.playbackMode('remote') } }
+  element.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', airplay)
   const resizeObserver = sizeOf && typeof ResizeObserver === 'function' ? new ResizeObserver(size) : null
   if (sizeOf) resizeObserver?.observe(sizeOf)
   if ((element.currentSrc || element.src) && !element.paused) current().play()
@@ -210,9 +229,10 @@ export function monitorVideo(
   return {
     setVideo(next) { info = next },
     setPlayer(next) { player = next },
-    rendition(kbps, width, height) {
-      rendition = [kbps, width, height]
-      view?.rendition(kbps, width, height)
+    playerSoftware(name, version) { player = { ...player, software: name, softwareVersion: version ?? player.softwareVersion } },
+    rendition(kbps, width, height, details) {
+      rendition = [kbps, width, height, details]
+      view?.rendition(kbps, width, height, details)
     },
     error(code, message, fatal, businessException = false) {
       if (!view || view.ended) return
@@ -247,6 +267,8 @@ export function monitorVideo(
       if (typeof document !== 'undefined') for (const name of docEvents) document.removeEventListener(name, modeNow)
       for (const name of elementEvents) element.removeEventListener(name, modeNow)
       tracks?.removeEventListener?.('change', captionsChanged)
+      remote?.removeEventListener?.('connect', remoteChanged)
+      element.removeEventListener('webkitcurrentplaybacktargetiswirelesschanged', airplay)
       resizeObserver?.disconnect()
       quality()
       if (view && !view.ended) view.end()

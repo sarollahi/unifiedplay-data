@@ -34,7 +34,7 @@ export function monitorCastReceiver(
   }),
   version?: string,
 ): PlayerDriver & { stop(): void } {
-  const driver = playerDriver(client, { name: 'cast', version })
+  const driver = playerDriver(client, { name: 'cast', version, software: 'Cast receiver', softwareVersion: version })
   const media = () => {
     const info = playerManager.getMediaInformation()
     return info ? describe(info) : null

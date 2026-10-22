@@ -4,8 +4,9 @@
 '
 ' tracker = UPD_NewTracker(video, player, clock)
 '   video:  { id, title, series_id, series_title, duration_ms, stream_type, source_type, source_host, cdn, drm_type, view_session_id,
-'             content_type, language_code, variant_name, encoding_variant, experiment_name, sub_property_id, custom ("1".."10") }
-'   player: { name, version, autoplay }
+'             content_type, language_code, variant_name, encoding_variant, experiment_name, sub_property_id, custom ("1".."10"),
+'             affiliate, brand, producer, creator_id, variant_id, drm_level }
+'   player: { name, version, autoplay, software, software_version, instance_id, language }
 '   clock:  invalid (a real clock) or { ms: 0 } (tests move clock.ms)
 
 function UPD_NewTracker(video as object, player as object, clock = invalid as dynamic) as object
@@ -18,6 +19,7 @@ function UPD_NewTracker(video as object, player as object, clock = invalid as dy
         beforeAd: "idle", adBreakAt: 0#, startupAdMs: 0#, adPlayingSince: invalid,
         cdn: UPD_Text(video.cdn), drmType: UPD_Text(video.drm_type), fullscreen: false, pip: false, mode: "standard", captionsOn: false,
         prerollAt: invalid, adRequestAt: invalid, adResponseAt: invalid,
+        details: {}, initial: invalid,
         metrics: {
             player_startup_ms: invalid, video_startup_ms: invalid, watch_ms: 0#, playing_ms: 0#,
             rebuffer_count: 0, rebuffer_ms: 0#, seek_count: 0, seek_ms: 0#, playhead_ms: 0#,
@@ -30,7 +32,8 @@ function UPD_NewTracker(video as object, player as object, clock = invalid as dy
             request_media_completed: 0, request_media_bytes: 0#, request_media_ms: 0#,
             request_media_ttfb_ms: 0#, request_media_ttfb_count: 0, request_media_max_ttfb_ms: 0#,
             content_startup_ms: invalid, ad_startup_ms: invalid, preroll_request_ms: invalid, preroll_load_ms: invalid,
-            preroll_requests: 0, upscale_pct_ms: 0#, downscale_pct_ms: 0#, max_downscale_pct: 0#
+            preroll_requests: 0, upscale_pct_ms: 0#, downscale_pct_ms: 0#, max_downscale_pct: 0#,
+            rendition_upshifts: 0, rendition_downshifts: 0
         },
         now: UPD_Now, event: UPD_Event, move: UPD_Move, account: UPD_Account, stopAdClock: UPD_StopAdClock,
         playerStartup: UPD_PlayerStartup, play: UPD_Play, playing: UPD_Playing, pause: UPD_Pause,
@@ -186,11 +189,29 @@ sub UPD_Seeked(paused as boolean)
     if paused then m.move("paused")
 end sub
 
-sub UPD_Rendition(kbps as dynamic, width as dynamic, height as dynamic)
+sub UPD_Rendition(kbps as dynamic, width as dynamic, height as dynamic, details = invalid as dynamic)
     if m.state = "ad" then return
+    if details <> invalid then
+        for each key in details
+            if details[key] <> invalid and details[key] <> "" then m.details[key] = details[key]
+        end for
+    end if
     if kbps = m.kbps and width = m.videoWidth and height = m.videoHeight then return
     m.account()
-    if m.firstFrame then m.metrics.rendition_changes = m.metrics.rendition_changes + 1
+    if m.initial = invalid and (kbps <> invalid or width <> invalid) then m.initial = { kbps: kbps, width: width, height: height }
+    if m.firstFrame then
+        m.metrics.rendition_changes = m.metrics.rendition_changes + 1
+        ' Up or down by bitrate, or by size where the player tells no bitrate.
+        before = m.videoHeight
+        after = height
+        if kbps <> invalid and m.kbps <> invalid then
+            before = m.kbps
+            after = kbps
+        end if
+        if before <> invalid and after <> invalid and after <> before then
+            if after > before then m.metrics.rendition_upshifts = m.metrics.rendition_upshifts + 1 else m.metrics.rendition_downshifts = m.metrics.rendition_downshifts + 1
+        end if
+    end if
     m.kbps = kbps
     m.videoWidth = width
     m.videoHeight = height
@@ -445,13 +466,26 @@ function UPD_Snapshot(maxEvents = 25 as integer) as object
     if m.drmType <> "" then drm = m.drmType
     streamType = v.stream_type
     if streamType = invalid then streamType = "on-demand"
+    initialKbps = invalid
+    initialWidth = invalid
+    initialHeight = invalid
+    if m.initial <> invalid then
+        if m.initial.kbps <> invalid then initialKbps = Int(m.initial.kbps + 0.5)
+        initialWidth = m.initial.width
+        initialHeight = m.initial.height
+    end if
     snapshot = {
         view_id: m.viewId, seq: m.seq, started_at: m.startedAt, ended: m.ended,
         video: { id: v.id, title: v.title, series_id: v.series_id, series_title: v.series_title, duration_ms: v.duration_ms,
                  stream_type: streamType, source_type: v.source_type, source_host: v.source_host, cdn: cdn, drm_type: drm,
-                 content_type: v.content_type, language_code: v.language_code, variant_name: v.variant_name, encoding_variant: v.encoding_variant },
+                 content_type: v.content_type, language_code: v.language_code, variant_name: v.variant_name, encoding_variant: v.encoding_variant,
+                 variant_id: v.variant_id, affiliate: v.affiliate, brand: v.brand, producer: v.producer, creator_id: v.creator_id, drm_level: v.drm_level },
         player: { name: m.player.name, version: m.player.version, autoplay: m.player.autoplay = true,
-                  width: m.playerWidth, height: m.playerHeight, fullscreen: m.fullscreen, pip: m.pip, captions: m.captionsOn },
+                  width: m.playerWidth, height: m.playerHeight, fullscreen: m.fullscreen, pip: m.pip, captions: m.captionsOn,
+                  software: m.player.software, software_version: m.player.software_version, instance_id: m.player.instance_id,
+                  language: m.player.language },
+        rendition: { video_codec: m.details.video_codec, audio_codec: m.details.audio_codec, framerate: m.details.framerate,
+                     dynamic_range: m.details.dynamic_range, initial_bitrate_kbps: initialKbps, initial_width: initialWidth, initial_height: initialHeight },
         metrics: metrics, custom: custom, error: m.error, events: events
     }
     if v.view_session_id <> invalid then snapshot.view_session_id = v.view_session_id

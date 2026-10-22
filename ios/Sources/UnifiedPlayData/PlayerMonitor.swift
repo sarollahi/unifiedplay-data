@@ -34,6 +34,7 @@ open class PlayerMonitor: AdTarget {
     public let client: DataClient
     private let info: PlayerInfo
     public private(set) var view: ViewTracker?
+    private let instanceID = UUID().uuidString.lowercased()
     private var sourceAt: Double?
     private var readyAt: Double?
     private var width = 0
@@ -96,6 +97,8 @@ open class PlayerMonitor: AdTarget {
         guard let video = describe() else { return nil }
         var player = info
         player.autoplay = autoplay()
+        player.instanceID = player.instanceID ?? instanceID
+        player.language = player.language ?? Locale.preferredLanguages.first
         let next = ViewTracker(video: video, player: player)
         view = next
         client.add(next)

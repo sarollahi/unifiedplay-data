@@ -31,6 +31,8 @@ export interface DataConfig {
    * (UnifiedPlay's own apps send the viewer's usr_ id, kept only with analytics consent.)
    */
   userId?: string
+  /** Your own words for the viewer's plan, for breakdowns: plan ("premium"), its status ("trialing"), its category ("sports"). */
+  viewer?: { plan?: string; planStatus?: string; planCategory?: string }
   intervalMs?: number
 }
 
@@ -62,6 +64,15 @@ export function webPlatform(ua: string = typeof navigator === 'undefined' ? '' :
   return /Tizen/.test(ua) ? 'tizen' : /Web0S|webOS/.test(ua) ? 'webos' : /CrKey/.test(ua) ? 'chromecast' : 'web'
 }
 
+/** tv, chromecast, tablet, phone or desktop, from the user agent. */
+export function deviceCategory(ua: string): string {
+  if (/CrKey/.test(ua)) return 'chromecast'
+  if (/Tizen|Web0S|webOS|SMART-TV|SmartTV|HbbTV|BRAVIA|AFT\w|Roku|PlayStation|Xbox|GoogleTV|Android TV/i.test(ua)) return 'tv'
+  if (/iPad|Tablet/.test(ua) || (/Android/.test(ua) && !/Mobi/.test(ua))) return 'tablet'
+  if (/Mobi|iPhone|iPod/.test(ua)) return 'phone'
+  return 'desktop'
+}
+
 /** What the browser tells about itself. */
 export function webDevice(nav: Navigator = navigator): Record<string, string> {
   const ua = nav.userAgent
@@ -87,6 +98,8 @@ export function webDevice(nav: Navigator = navigator): Record<string, string> {
     model: /Tizen|Web0S|webOS|SMART-TV|CrKey/.test(ua) ? 'TV' : /Mobi|Android|iPhone/.test(ua) ? 'Mobile' : /iPad|Tablet/.test(ua) ? 'Tablet' : 'Desktop',
     connection: connection?.type ?? connection?.effectiveType ?? '',
     app_id: typeof location === 'undefined' ? '' : location.hostname,
+    category: deviceCategory(ua),
+    user_agent: ua.slice(0, 500),
   }
 }
 
@@ -122,6 +135,11 @@ export class DataClient {
     this.config.userId = userId
   }
 
+  /** The viewer's plan changed (signed in, subscribed): the next beacons carry it. */
+  setViewer(viewer: DataConfig['viewer']): void {
+    this.config.viewer = viewer
+  }
+
   add(view: ViewTracker): void {
     if (this.disabled) return
     this.views.add(view)
@@ -140,7 +158,10 @@ export class DataClient {
       platform: this.config.platform ?? webPlatform(),
       sdk: { name: SDK_NAME, version: SDK_VERSION },
       session_id: this.sessionId,
-      viewer: { device_id: this.deviceId, user_id: this.config.userId ?? '' },
+      viewer: {
+        device_id: this.deviceId, user_id: this.config.userId ?? '',
+        plan: this.config.viewer?.plan, plan_status: this.config.viewer?.planStatus, plan_category: this.config.viewer?.planCategory,
+      },
       device: this.device,
       views: snapshots,
     })
