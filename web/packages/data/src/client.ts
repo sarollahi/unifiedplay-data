@@ -1,7 +1,7 @@
 import type { ViewTracker } from './tracker.js'
 
 export const SDK_NAME = 'unifiedplay-data-web'
-export const SDK_VERSION = '1.1.0'
+export const SDK_VERSION = '1.1.1'
 export const DEFAULT_API_BASE = 'https://backend.unifiedplay.com'
 const BEACON_PATH = '/api/v1/data/beacons'
 // A beacon carries at most this much, far under the backend's 64 KB; the rest goes with the next ones.

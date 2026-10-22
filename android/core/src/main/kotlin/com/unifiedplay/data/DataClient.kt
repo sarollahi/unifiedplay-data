@@ -15,7 +15,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 const val SDK_NAME = "unifiedplay-data-android"
-const val SDK_VERSION = "1.1.0"
+const val SDK_VERSION = "1.1.1"
 const val DEFAULT_API_BASE = "https://backend.unifiedplay.com"
 private const val BEACON_PATH = "/api/v1/data/beacons"
 private const val PREFS = "unifiedplay-data"

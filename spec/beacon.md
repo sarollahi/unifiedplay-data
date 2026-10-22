@@ -58,7 +58,7 @@ events of each; the rest go with the next beacons.
 
 ```json
 {
-  "sdk": {"name": "unifiedplay-data-android", "version": "1.1.0"},
+  "sdk": {"name": "unifiedplay-data-android", "version": "1.1.1"},
   "session_id": "3f2c…",
   "viewer": {"device_id": "a1b2…", "user_id": "usr_…"},
   "device": {
