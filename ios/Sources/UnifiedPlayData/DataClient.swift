@@ -5,7 +5,7 @@ import UIKit
 #endif
 
 public let sdkName = "unifiedplay-data-ios"
-public let sdkVersion = "1.1.0"
+public let sdkVersion = "1.1.1"
 public let defaultAPIBase = URL(string: "https://backend.unifiedplay.com")!
 private let beaconPath = "/api/v1/data/beacons"
 private let deviceKey = "unifiedplay-data-device"
