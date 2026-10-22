@@ -34,6 +34,10 @@ public final class AVPlayerMonitor: PlayerMonitor {
     private weak var layer: AVPlayerLayer?
     private let describeItem: (AVPlayerItem) -> VideoInfo
     private var kbps: Double?
+    // The item's variants (HLS master playlist): size on screen → its declared bitrate.
+    private var variants: [(width: Int, height: Int, kbps: Double)] = []
+    // AVPlayer said .playing before the layer had a frame to show.
+    private var awaitingFrame = false
     private var playerObservations: [NSKeyValueObservation] = []
     private var itemObservations: [NSKeyValueObservation] = []
     private var itemTokens: [NSObjectProtocol] = []
@@ -62,6 +66,11 @@ public final class AVPlayerMonitor: PlayerMonitor {
                 Self.onMain { if player.isExternalPlaybackActive { self?.playbackMode("remote") } }
             },
         ]
+        if let layer {
+            playerObservations.append(layer.observe(\.isReadyForDisplay, options: [.new]) { [weak self] layer, _ in
+                Self.onMain { if layer.isReadyForDisplay { self?.frameShown() } }
+            })
+        }
         if player.rate != 0 { current()?.play() }
     }
 
@@ -70,10 +79,8 @@ public final class AVPlayerMonitor: PlayerMonitor {
     public override func autoplay() -> Bool { (player?.rate ?? 0) != 0 }
 
     public override func onNewView(_ view: ViewTracker) {
-        guard let size = player?.currentItem?.presentationSize else { return }
-        if kbps != nil || size.width > 0 {
-            view.rendition(kbps: kbps, width: size.width > 0 ? Int(size.width) : nil, height: size.height > 0 ? Int(size.height) : nil)
-        }
+        guard let item = player?.currentItem, let (kbps, width, height) = rendition(of: item), kbps != nil || width != nil else { return }
+        view.rendition(kbps: kbps, width: width, height: height)
     }
 
     public override func beforeBeacon(_ view: ViewTracker) {
@@ -101,7 +108,9 @@ public final class AVPlayerMonitor: PlayerMonitor {
 
     private func itemChanged(_ item: AVPlayerItem?) {
         stopItem()
+        awaitingFrame = false
         kbps = nil
+        variants = []
         reported = [:]
         newSource(hasSource: item != nil)
         guard let item else { return }
@@ -109,6 +118,16 @@ public final class AVPlayerMonitor: PlayerMonitor {
         let asset = item.asset
         Task { @MainActor [weak self] in
             if (try? await asset.load(.hasProtectedContent)) == true { self?.setDrmType("fairplay") }
+        }
+        if let asset = asset as? AVURLAsset {
+            Task { @MainActor [weak self] in
+                guard let variants = try? await asset.load(.variants), let self, player?.currentItem === item else { return }
+                self.variants = variants.compactMap { variant in
+                    guard let size = variant.videoAttributes?.presentationSize, size.width > 0, let peak = variant.peakBitRate, peak > 0 else { return nil }
+                    return (Int(size.width), Int(size.height), peak / 1000)
+                }
+                renditionChanged(item)
+            }
         }
         if item.status == .readyToPlay { ready() }
         itemObservations = [
@@ -196,7 +215,9 @@ public final class AVPlayerMonitor: PlayerMonitor {
 
     private func itemStatusChanged(_ item: AVPlayerItem) {
         switch item.status {
-        case .readyToPlay: ready()
+        case .readyToPlay:
+            ready()
+            renditionChanged(item)
         case .failed: fail(item.error as NSError?)
         default: break
         }
@@ -213,9 +234,7 @@ public final class AVPlayerMonitor: PlayerMonitor {
         guard let view else { return }
         switch player.timeControlStatus {
         case .playing:
-            let first = view.videoStartupMs == nil
-            view.playing()
-            if first { client.flush() }
+            playing(player, view)
         case .waitingToPlayAtSpecifiedRate:
             if player.reasonForWaitingToPlay == .toMinimizeStalls { view.bufferingStart() }
         case .paused:
@@ -234,15 +253,55 @@ public final class AVPlayerMonitor: PlayerMonitor {
         // A jump inside the buffer never stops playback: then the seek is over at once.
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
-                if player.timeControlStatus == .playing { view.playing() } else if player.rate == 0 { view.seeked(paused: true) }
+                if player.timeControlStatus == .playing { self.playing(player, view) } else if player.rate == 0 { view.seeked(paused: true) }
             }
         }
     }
 
+    /// Frames are moving. The first time, with a layer, only once it has a frame to show: for a prerolled
+    /// item AVPlayer says .playing on the same tick as play(), and its clock runs from then whatever is on screen.
+    private func playing(_ player: AVPlayer, _ view: ViewTracker) {
+        let first = view.videoStartupMs == nil
+        if first, let layer, !layer.isReadyForDisplay, !player.isExternalPlaybackActive, player.currentItem.map(Self.hasVideo) == true {
+            awaitingFrame = true
+            return
+        }
+        view.playing()
+        if first { client.flush() }
+    }
+
+    private func frameShown() {
+        guard awaitingFrame, let player, let view else { return }
+        awaitingFrame = false
+        if player.timeControlStatus == .playing { playing(player, view) }
+    }
+
+    private static func hasVideo(_ item: AVPlayerItem) -> Bool {
+        item.tracks.contains { $0.assetTrack?.mediaType == .video }
+    }
+
     private func renditionChanged(_ item: AVPlayerItem) {
+        guard let (kbps, width, height) = rendition(of: item) else { return }
+        view?.rendition(kbps: kbps, width: width, height: height, details: Self.details(of: item))
+    }
+
+    /// The rendition on screen. The access log's bitrate is the variant being downloaded, which runs ahead
+    /// of the one shown at every switch, so the bitrate is the declared one of the variant of the size shown.
+    /// Nil while a video has no size yet.
+    private func rendition(of item: AVPlayerItem) -> (Double?, Int?, Int?)? {
         let size = item.presentationSize
-        view?.rendition(kbps: kbps, width: size.width > 0 ? Int(size.width) : nil, height: size.height > 0 ? Int(size.height) : nil,
-                        details: Self.details(of: item))
+        guard size.width > 0 else {
+            let audioOnly = !item.tracks.isEmpty && !Self.hasVideo(item)
+            return audioOnly ? (kbps, nil, nil) : nil
+        }
+        let (width, height) = (Int(size.width), Int(size.height))
+        return (Self.declaredKbps(variants, width: width, height: height, indicated: kbps) ?? kbps, width, height)
+    }
+
+    /// The declared bitrate of the variant of this size; of several that size, the one the access log names.
+    static func declaredKbps(_ variants: [(width: Int, height: Int, kbps: Double)], width: Int, height: Int, indicated: Double?) -> Double? {
+        let shown = variants.filter { $0.width == width && $0.height == height }
+        return shown.count == 1 ? shown[0].kbps : shown.first { $0.kbps == indicated }?.kbps
     }
 
     /// Codecs (as FourCC: avc1, hvc1, dvh1, mp4a…), frame rate and dynamic range of the item's playing tracks.

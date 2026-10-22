@@ -91,6 +91,9 @@ let monitor = AVPlayerMonitor.attach(client: data, player: player, layer: player
 }
 ```
 
+Pass the layer that shows the video: video startup then ends when it has a frame to show. Without
+it, startup ends when AVPlayer says it is playing, which for a prerolled item is the tick play() was called.
+
 The access log gives the requests (bytes, transfer time) and the error log the failed ones;
 FairPlay content is seen by itself. Tell fullscreen and picture-in-picture with
 `monitor.playbackMode("fullscreen")` / `"pip"` / `"standard"`.
